@@ -25,8 +25,8 @@ import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondit
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.1";
-const DEBUG_BUILD_DATE = "2026-09-12";
+const DEBUG_VERSION = "0.8.0-beta.2";
+const DEBUG_BUILD_DATE = "2026-09-15";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
 const ISSUES_URL = `${REPO_URL}/issues`;
@@ -2111,7 +2111,7 @@ class AutomationPlusPanel extends HTMLElement {
 
   // Sidebar gauche "ajouter un bloc" — placeholder statique grisé, sans
   // logique de recherche/ajout (édition non disponible dans ce lot, #5).
-  // Liste réelle des 11 types pilotée par BLOCK_TYPES (catalogue statique,
+  // Liste réelle des 40 types pilotée par BLOCK_TYPES (catalogue statique,
   // #22) plutôt qu'en dur ici, fidèle au contenu à plat du .pen (pas de
   // catégories repliables).
   _renderEditionPaletteSection(icon, title, items) {
