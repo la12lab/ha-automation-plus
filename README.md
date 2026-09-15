@@ -63,11 +63,12 @@ au rechargement.
   formulaire dans le panneau Paramètres
 - Modifier ses champs (formulaire dédié pour les types courants, sinon
   clé/valeur brute pour les autres)
+- Dupliquer, activer/désactiver ou supprimer un bloc (menu kebab de la carte)
 - Annuler pour tout recharger depuis Home Assistant
 
 **Non éditable**
 - Ajouter un bloc depuis la Palette
-- Supprimer un bloc
+- Réordonner les blocs (glisser-déposer)
 - Enregistrer (écriture réelle vers Home Assistant)
 - Annuler/Refaire pas à pas (undo/redo)
 
@@ -77,8 +78,8 @@ Sans date précise — grands axes de développement à venir :
 
 | Item | Progress | Détail |
 |---|---|---|
-| 💻 Édition Code | 🔄 | Mode d'édition du YAML brut |
-| 🧩 Édition Bloc | 🔄 | Mode d'édition par blocs |
+| 💻 Édition Code | 🔄 (lecture seule) | Mode d'édition du YAML brut |
+| 🧩 Édition Bloc | 🔄 (lecture seule) | Mode d'édition par blocs |
 | 🔀 Édition Graph | ⚪ | Mode d'édition sous forme de graphe visuel |
 | 📁 Mode dossier dédié | ⚪ | Stockage alternatif en un fichier *.yaml par automatisation |
 | 🎨 Personnalisation | ⚪ | Options de personnalisations du panel |
