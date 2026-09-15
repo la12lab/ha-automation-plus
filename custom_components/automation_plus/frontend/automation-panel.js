@@ -18,14 +18,14 @@
 // HA assigne directement les propriétés hass / narrow / panel sur l'élément,
 // pas via des attributs HTML — d'où l'usage de set hass(value) plutôt que attributeChangedCallback.
 
-import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondition, describeAction } from "./automation-blocks-catalog.js";
+import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondition, describeAction, getBlockFields, formatDuration } from "./automation-blocks-catalog.js";
 
 // Infos de debug — pas de pipeline de build pour l'instant, donc à tenir à
 // jour manuellement en même temps que manifest.json. DEBUG_VERSION reste
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.2";
+const DEBUG_VERSION = "0.8.0-beta.3";
 const DEBUG_BUILD_DATE = "2026-09-15";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
@@ -231,6 +231,22 @@ function pickList(config, singularKey, pluralKey) {
   return Array.isArray(raw) ? raw : [raw];
 }
 
+// Clés singulier/pluriel HA par catégorie de bloc (page Édition, vue
+// Liste) — utilisé à la fois pour lire (pickList) et pour écrire
+// (_editionMutateList, issue #101) une liste trigger(s)/condition(s)/
+// action(s).
+const EDITION_LIST_KEYS = {
+  trigger: ["trigger", "triggers"],
+  condition: ["condition", "conditions"],
+  action: ["action", "actions"],
+};
+
+const EDITION_CATEGORY_LABELS = {
+  trigger: "Déclencheur",
+  condition: "Condition",
+  action: "Action",
+};
+
 // Valide `label.color` (issu du label_registry HA) avant interpolation dans
 // un attribut `style` — escapeHtml() bloque la sortie de l'attribut mais pas
 // une valeur CSS malformée (ex. "red;background:...") qui casserait le rendu
@@ -358,6 +374,15 @@ class AutomationPlusPanel extends HTMLElement {
     // Vue par défaut de la page Édition : Liste, cf. issue #5. Code reste
     // disponible comme onglet secondaire, chargé en lazy (voir _loadEditionYaml).
     this._editionSubView = "liste";
+    // Panneau Paramètres fonctionnel (issue #101) : bloc sélectionné dans la
+    // Zone Centrale (chemin plat {category, index}, pas de chemin imbriqué —
+    // les blocs composites choose/if ne sont affichés que comme une seule
+    // carte, cf. plan). Écriture en mémoire uniquement dans
+    // this._editionYaml.config, jamais persistée (dépend de #88/#89/#92).
+    // _editionDirty reflète l'existence d'au moins une modification non
+    // enregistrée depuis le chargement — pilote le bandeau lecture seule.
+    this._selectedBlock = null;
+    this._editionDirty = false;
   }
 
   // Instantané minimal des entités automation.* pertinentes pour le rendu
@@ -1183,6 +1208,8 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionSubView = "liste";
     this._editionAutomation = automation;
     this._editionHelpOpen = false;
+    this._selectedBlock = null;
+    this._editionDirty = false;
     this._render();
     this._loadEditionYaml();
   }
@@ -1230,6 +1257,125 @@ class AutomationPlusPanel extends HTMLElement {
     } finally {
       this._render();
     }
+  }
+
+  // Vrai si le bloc à cet index de cette catégorie est le bloc actuellement
+  // sélectionné dans le Panneau Paramètres (issue #101).
+  _isBlockSelected(category, index) {
+    return !!this._selectedBlock && this._selectedBlock.category === category && this._selectedBlock.index === index;
+  }
+
+  // Résout l'objet bloc actuellement sélectionné à partir de
+  // this._editionYaml.config — jamais mis en cache séparément, toujours lu
+  // depuis la source unique pour rester cohérent après mutation.
+  _editionGetSelectedBlock() {
+    if (!this._selectedBlock) return null;
+    const state = this._editionYaml;
+    if (!state || !state.config) return null;
+    const [singular, plural] = EDITION_LIST_KEYS[this._selectedBlock.category];
+    return pickList(state.config, singular, plural)[this._selectedBlock.index] ?? null;
+  }
+
+  _editionGetFieldValue(block, key) {
+    const segments = key.split(".");
+    let cur = block;
+    for (const segment of segments) {
+      if (cur == null) return undefined;
+      cur = cur[segment];
+    }
+    return cur;
+  }
+
+  _editionSetFieldValue(block, key, value) {
+    const segments = key.split(".");
+    let cur = block;
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (typeof cur[segments[i]] !== "object" || cur[segments[i]] === null) cur[segments[i]] = {};
+      cur = cur[segments[i]];
+    }
+    const lastKey = segments[segments.length - 1];
+    if (value === "" || value === undefined) delete cur[lastKey];
+    else cur[lastKey] = value;
+  }
+
+  // Repli générique (bloc hors schéma, cf. getBlockFields "raw") : tente de
+  // reconnaître un nombre/booléen pour ne pas dégrader silencieusement le
+  // type d'une valeur existante non modifiée en simple chaîne de caractères.
+  _editionParseRawValue(text) {
+    if (text === "") return "";
+    if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
+    if (text === "true") return true;
+    if (text === "false") return false;
+    return text;
+  }
+
+  // Point d'écriture unique de toute mutation d'une liste trigger(s)/
+  // condition(s)/action(s) (issue #101) : lit une copie profonde via
+  // pickList (jamais l'objet config d'origine en place), applique
+  // `mutator(list)`, puis réécrit systématiquement sur la clé plurielle —
+  // normalisation assumée (voir plan), supprime la forme singulière si
+  // présente. Ré-génère aussi this._editionYaml.lines à chaque appel pour
+  // que l'onglet Code ne reste jamais périmé (bascule Liste → Code). Aucun
+  // appel réseau : écriture 100% en mémoire (dépend de #88/#89/#92 pour la
+  // persistance réelle).
+  _editionMutateList(category, mutator) {
+    const state = this._editionYaml;
+    if (!state || !state.config) return;
+    const [singular, plural] = EDITION_LIST_KEYS[category];
+    const list = JSON.parse(JSON.stringify(pickList(state.config, singular, plural)));
+    mutator(list);
+    const config = { ...state.config, [plural]: list };
+    delete config[singular];
+    state.config = config;
+    state.lines = this._stringifyYaml(config);
+    this._editionDirty = true;
+  }
+
+  _editionSetBlockField(key, fieldType, rawValue) {
+    if (!this._selectedBlock) return;
+    const { category, index } = this._selectedBlock;
+    let value = rawValue;
+    if (fieldType === "number") {
+      value = rawValue === "" ? undefined : Number(rawValue);
+      if (Number.isNaN(value)) value = undefined;
+    } else if (fieldType === "raw") {
+      value = this._editionParseRawValue(rawValue);
+    } else if (fieldType !== "boolean") {
+      value = rawValue === "" ? undefined : rawValue;
+    }
+    this._editionMutateList(category, (list) => {
+      const block = list[index];
+      if (!block) return;
+      this._editionSetFieldValue(block, key, value);
+    });
+    this._render();
+  }
+
+  _editionAddRawField(key, rawValue) {
+    const trimmedKey = key.trim();
+    if (!trimmedKey || !this._selectedBlock) return;
+    this._editionSetBlockField(trimmedKey, "raw", rawValue);
+  }
+
+  _editionEntityOptions() {
+    const hass = this._hass;
+    if (!hass || !hass.states) return "";
+    return Object.keys(hass.states)
+      .sort()
+      .map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(hass.states[id]?.attributes?.friendly_name || "")}</option>`)
+      .join("");
+  }
+
+  // Bouton "Annuler" du header, vue Liste (issue #101, suite à retour
+  // utilisateur) : abandonne TOUTES les modifications en mémoire d'un coup
+  // en rechargeant l'automatisation depuis HA — aucune écriture réseau,
+  // reste dans le périmètre mémoire déjà validé. Un historique pas à pas
+  // (Undo/Redo réel) reste une fonctionnalité séparée, voir issue #90.
+  _editionDiscardChanges() {
+    if (!this._editionDirty) return;
+    this._selectedBlock = null;
+    this._editionDirty = false;
+    this._loadEditionYaml();
   }
 
   _openDetailPopup(automation) {
@@ -1928,6 +2074,15 @@ class AutomationPlusPanel extends HTMLElement {
   _renderEditionToolbar() {
     const automation = this._editionAutomation;
     const name = automation ? automation.name : "";
+    // "Déverrouiller" est spécifique au flux Code (#87/#88, verrou avant
+    // édition brute) — masqué en vue Liste, où l'édition de champs est
+    // directement possible sans déverrouillage (issue #101). Undo/Redo
+    // restent visibles-mais-désactivés dans les 2 vues : un vrai historique
+    // pas à pas reste une fonctionnalité à part entière (issue #90), pas
+    // traitée dans ce lot — seule "Annuler" (tout annuler d'un coup, en
+    // rechargeant depuis HA) est activée ci-dessous pour la vue Liste.
+    const showLock = this._editionSubView === "code";
+    const cancelEnabled = this._editionSubView === "liste" && this._editionDirty;
     return `
       <div class="header edition-toolbar">
         <div class="header-left">
@@ -1951,17 +2106,28 @@ class AutomationPlusPanel extends HTMLElement {
           </span>
         </div>
         <div class="header-actions">
+          ${
+            showLock
+              ? `
           <button class="edition-lock-btn" title="Pas encore disponible" disabled>
             ${this._icon(ICON_LOCK, 14)}<span>Déverrouiller</span>
           </button>
           <span class="edition-actions-separator"></span>
+          `
+              : ""
+          }
           <button class="icon-button" title="Pas encore disponible" disabled>
             ${this._icon(ICON_UNDO_2, 20)}
           </button>
           <button class="icon-button" title="Pas encore disponible" disabled>
             ${this._icon(ICON_REDO_2, 20)}
           </button>
-          <button class="popup-btn popup-btn-secondary" title="Pas encore disponible" disabled>Annuler</button>
+          <button
+            class="popup-btn popup-btn-secondary"
+            data-action="discard-edition-changes"
+            title="${cancelEnabled ? "Annuler les modifications non enregistrées" : "Pas encore disponible"}"
+            ${cancelEnabled ? "" : "disabled"}
+          >Annuler</button>
           <button class="popup-btn popup-btn-primary" title="Pas encore disponible" disabled>
             ${this._icon(ICON_CHECK, 14)}<span>Enregistrer</span>
           </button>
@@ -1977,8 +2143,21 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
-  // Bandeau lecture seule commun aux deux onglets d'Édition (Liste/Code).
+  // Bandeau commun aux deux onglets d'Édition (Liste/Code). L'onglet Code
+  // reste intégralement lecture seule (#87) ; l'onglet Liste permet
+  // maintenant des modifications en mémoire (#101) — le bandeau reflète
+  // alors l'état "non enregistré" plutôt que "lecture seule", tant qu'aucune
+  // édition n'existe le message générique reste affiché. Écriture réelle
+  // toujours hors périmètre (#88/#89/#92).
   _renderEditionReadonlyBanner() {
+    if (this._editionSubView === "liste" && this._editionDirty) {
+      return `
+        <div class="edition-readonly-banner edition-readonly-banner-dirty">
+          ${this._icon(ICON_ALERT_TRIANGLE, 14)}
+          <span>Modifications non enregistrées — l'enregistrement sera bientôt disponible.</span>
+        </div>
+      `;
+    }
     return `
       <div class="edition-readonly-banner">
         ${this._icon(ICON_LOCK, 14)}
@@ -2023,10 +2202,10 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
-  // Contenu de l'onglet Liste (lecture seule — #5) : Sidebar Palette et
-  // Panneau Paramètres affichés grisés/inertes (fidélité visuelle au .pen,
-  // aucune logique d'ajout/sélection/édition de bloc réelle dans ce lot) —
-  // seule la Zone Centrale (3 groupes) est réellement pilotée par données.
+  // Contenu de l'onglet Liste : Zone Centrale (3 groupes) pilotée par
+  // données, cartes sélectionnables et Panneau Paramètres fonctionnel en
+  // mémoire (#101). Sidebar Palette toujours grisée/inerte (ajout de bloc
+  // hors périmètre, #102).
   _renderEditionListe() {
     const state = this._editionYaml;
     let centralHtml;
@@ -2050,14 +2229,17 @@ class AutomationPlusPanel extends HTMLElement {
   }
 
   // Une "card" par bloc trigger/condition/action, décrite via le catalogue
-  // statique (automation-blocks-catalog.js — #22). Poignée de glisser-déposer
-  // et menu kebab affichés (fidélité visuelle au .pen) mais inertes : pas de
-  // drag ni de sélection réels dans ce lot lecture seule. Pastille d'icône
-  // colorée par catégorie, comme dans le .pen (Carte Déclencheur/Condition/
-  // Action de « Edition automatisation - liste »).
-  _renderEditionBlockCard(category, entry) {
+  // statique (automation-blocks-catalog.js — #22). Cliquable pour la
+  // sélectionner et l'éditer dans le Panneau Paramètres (issue #101) — le
+  // clic est géré par délégation sur .edition-liste-body, voir
+  // _attachListeners(). Poignée de glisser-déposer et menu kebab affichés
+  // (fidélité visuelle au .pen) mais toujours inertes ce lot (drag-and-drop
+  // et actions par bloc hors périmètre, #102). Pastille d'icône colorée par
+  // catégorie, comme dans le .pen (Carte Déclencheur/Condition/Action de
+  // « Edition automatisation - liste »).
+  _renderEditionBlockCard(category, entry, index, selected) {
     return `
-      <div class="edition-block-card">
+      <div class="edition-block-card${selected ? " selected" : ""}" data-category="${category}" data-index="${index}">
         ${this._icon(ICON_GRIP_VERTICAL, 14)}
         <span class="edition-block-icon edition-block-icon-${category}">${this._icon(entry.icon, 16)}</span>
         <div class="edition-block-text">
@@ -2094,13 +2276,13 @@ class AutomationPlusPanel extends HTMLElement {
   _renderEditionListeGroups(config) {
     const hass = this._hass;
     const triggers = pickList(config, "trigger", "triggers")
-      .map((t) => this._renderEditionBlockCard("trigger", describeTrigger(t, hass)))
+      .map((t, i) => this._renderEditionBlockCard("trigger", describeTrigger(t, hass), i, this._isBlockSelected("trigger", i)))
       .join("");
     const conditions = pickList(config, "condition", "conditions")
-      .map((c) => this._renderEditionBlockCard("condition", describeCondition(c, hass)))
+      .map((c, i) => this._renderEditionBlockCard("condition", describeCondition(c, hass), i, this._isBlockSelected("condition", i)))
       .join("");
     const actions = pickList(config, "action", "actions")
-      .map((a) => this._renderEditionBlockCard("action", describeAction(a, hass)))
+      .map((a, i) => this._renderEditionBlockCard("action", describeAction(a, hass), i, this._isBlockSelected("action", i)))
       .join("");
     return `
       ${this._renderEditionGroup("trigger", ICON_ZAP, "Déclencheur", triggers, "Ajouter un déclencheur")}
@@ -2147,15 +2329,133 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
-  // Panneau droit "paramètres du bloc" — placeholder statique grisé (aucun
-  // bloc n'est réellement sélectionnable dans ce lot lecture seule, #5) :
-  // pas de bouton "Supprimer le bloc" ici, il n'y a jamais de bloc sélectionné.
+  // Un champ du formulaire dynamique (issue #101), piloté par le schéma
+  // getBlockFields() du catalogue. Écriture sur "change" (pas "input") pour
+  // les champs texte/nombre : un re-render complet à chaque frappe casserait
+  // le focus/curseur (pas de rendu partiel dans ce projet, voir plan).
+  _renderEditionFieldRow(block, field) {
+    const value = this._editionGetFieldValue(block, field.key);
+    // Un champ "duration" peut porter un objet HA ({hours,minutes,seconds})
+    // plutôt qu'une chaîne HH:MM:SS — affiché lisible via formatDuration()
+    // plutôt que "[object Object]". Reste un champ texte libre à l'édition :
+    // toute saisie réécrit une chaîne simple (normalisation assumée, cf. plan).
+    const display =
+      value === undefined || value === null
+        ? ""
+        : field.type === "duration" && typeof value === "object"
+          ? formatDuration(value)
+          : value;
+    const keyAttr = escapeHtml(field.key);
+    let inputHtml;
+    if (field.type === "entity") {
+      const listId = `edition-entities-${field.key.replace(/[^a-zA-Z0-9]/g, "_")}`;
+      inputHtml = `
+        <input type="text" class="detail-input" list="${listId}" data-field-key="${keyAttr}" data-field-type="text" value="${escapeHtml(String(display))}" placeholder="${escapeHtml(field.placeholder || "entity_id")}" />
+        <datalist id="${listId}">${this._editionEntityOptions()}</datalist>
+      `;
+    } else if (field.type === "number") {
+      inputHtml = `<input type="number" class="detail-input" data-field-key="${keyAttr}" data-field-type="number" value="${display === "" ? "" : escapeHtml(String(display))}" />`;
+    } else if (field.type === "boolean") {
+      inputHtml = `<span class="state-toggle edition-field-toggle${value ? " on" : ""}" data-field-key="${keyAttr}" data-field-type="boolean" data-value="${value ? "true" : "false"}"><span class="state-toggle-knob"></span></span>`;
+    } else if (field.type === "template") {
+      inputHtml = `<textarea class="detail-input edition-field-textarea" data-field-key="${keyAttr}" data-field-type="text">${escapeHtml(String(display))}</textarea>`;
+    } else if (field.type === "select") {
+      const options = (field.options || [])
+        .map((o) => `<option value="${escapeHtml(o.value)}"${o.value === display ? " selected" : ""}>${escapeHtml(o.label)}</option>`)
+        .join("");
+      inputHtml = `<select class="detail-select" data-field-key="${keyAttr}" data-field-type="text"><option value=""></option>${options}</select>`;
+    } else {
+      inputHtml = `<input type="text" class="detail-input" data-field-key="${keyAttr}" data-field-type="text" value="${escapeHtml(String(display))}" placeholder="${escapeHtml(field.placeholder || "")}" />`;
+    }
+    return `
+      <div class="detail-field edition-field">
+        <span class="detail-label">${escapeHtml(field.label)}</span>
+        ${inputHtml}
+      </div>
+    `;
+  }
+
+  // Repli générique (bloc hors schéma statique, cf. getBlockFields "raw") :
+  // une ligne éditable par clé déjà présente dans le bloc, plus un mini
+  // formulaire pour en ajouter une nouvelle. Jamais de bloc non éditable.
+  _renderEditionRawFields(block, keys) {
+    const rows = keys
+      .map((key) => {
+        const raw = block[key];
+        const display = typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "");
+        return `
+          <div class="detail-field edition-field">
+            <span class="detail-label">${escapeHtml(key)}</span>
+            <input type="text" class="detail-input" data-field-key="${escapeHtml(key)}" data-field-type="raw" value="${escapeHtml(display)}" />
+          </div>
+        `;
+      })
+      .join("");
+    return `
+      <div class="edition-field-raw-list">${rows}</div>
+      <div class="edition-field-raw-add">
+        <input type="text" class="detail-input edition-raw-add-key" placeholder="Nouvelle clé" />
+        <input type="text" class="detail-input edition-raw-add-value" placeholder="Valeur" />
+        <button class="icon-button" data-action="add-raw-field" title="Ajouter la clé">
+          ${this._icon(ICON_PLUS, 16)}
+        </button>
+      </div>
+    `;
+  }
+
+  // Panneau droit "paramètres du bloc" (issue #101) : état vide inchangé
+  // tant qu'aucun bloc n'est sélectionné, formulaire dynamique (schéma réel
+  // ou repli clé→valeur générique) sinon. Écriture 100% en mémoire dans
+  // this._editionYaml.config — pas de bouton "Supprimer le bloc" fonctionnel
+  // ce lot (affiché désactivé, activation prévue avec la palette, #102).
   _renderEditionSettingsPanel() {
+    const block = this._editionGetSelectedBlock();
+    if (!this._selectedBlock || !block) {
+      return `
+        <div class="edition-settings-panel">
+          <div class="edition-settings-empty">
+            ${this._icon(ICON_SETTINGS, 28)}
+            <p>Sélectionnez un bloc pour afficher ses paramètres.</p>
+          </div>
+        </div>
+      `;
+    }
+    const { category, index } = this._selectedBlock;
+    const hass = this._hass;
+    const described =
+      category === "trigger" ? describeTrigger(block, hass) : category === "condition" ? describeCondition(block, hass) : describeAction(block, hass);
+    const fieldsInfo = getBlockFields(category, block);
+    const bodyHtml =
+      fieldsInfo.kind === "schema"
+        ? fieldsInfo.fields.map((field) => this._renderEditionFieldRow(block, field)).join("")
+        : this._renderEditionRawFields(block, fieldsInfo.keys);
+    const yamlPreview = this._stringifyYaml(block)
+      .map((line) => escapeHtml(line || " "))
+      .join("\n");
     return `
       <div class="edition-settings-panel">
-        <div class="edition-settings-empty">
-          ${this._icon(ICON_SETTINGS, 28)}
-          <p>Sélectionnez un bloc pour afficher ses paramètres.</p>
+        <div class="edition-settings-header">
+          <span class="edition-settings-icon edition-block-icon-${category}">${this._icon(described.icon, 15)}</span>
+          <div class="edition-settings-header-text">
+            <span class="edition-settings-title">${escapeHtml(described.title)}</span>
+            <span class="edition-settings-subtitle">${escapeHtml(EDITION_CATEGORY_LABELS[category])} · bloc ${index + 1}</span>
+          </div>
+          <button class="icon-button edition-settings-close" data-action="close-settings" title="Fermer">
+            ${this._icon(ICON_X, 16)}
+          </button>
+        </div>
+        <div class="scroll-area edition-settings-body">
+          ${bodyHtml}
+          <div class="edition-settings-separator"></div>
+          <div class="edition-field-yaml-preview">
+            <span class="detail-label">YAML généré</span>
+            <pre class="edition-yaml-preview-block">${yamlPreview}</pre>
+          </div>
+        </div>
+        <div class="edition-settings-footer">
+          <button class="edition-settings-delete-btn" title="Pas encore disponible" disabled>
+            ${this._icon(ICON_TRASH, 14)}<span>Supprimer le bloc</span>
+          </button>
         </div>
       </div>
     `;
@@ -2392,6 +2692,10 @@ class AutomationPlusPanel extends HTMLElement {
           color: var(--secondary-text-color, #666);
           font-size: 13px;
         }
+        .edition-readonly-banner-dirty {
+          background: color-mix(in srgb, var(--warning-color, #ff9800) 12%, var(--secondary-background-color, #f1f3f4));
+          color: var(--warning-color, #ff9800);
+        }
         .edition-scroll-area {
           padding: 20px;
         }
@@ -2454,11 +2758,13 @@ class AutomationPlusPanel extends HTMLElement {
           flex: 1;
           min-height: 0;
         }
-        .edition-palette,
-        .edition-settings-panel {
+        .edition-palette {
           flex-shrink: 0;
           opacity: 0.65;
           pointer-events: none;
+        }
+        .edition-settings-panel {
+          flex-shrink: 0;
         }
         .edition-palette {
           display: flex;
@@ -2558,6 +2864,146 @@ class AutomationPlusPanel extends HTMLElement {
           margin: 0;
           font-size: 13px;
         }
+        /* Panneau Paramètres rempli (issue #101), fidèle au .pen (nœud
+           iA6tt) — variables déjà figées via DESIGN-COLORS.md (--ap-btn-bg
+           pour les champs, --ap-surface pour le fond du panneau déjà posé
+           plus haut). */
+        .edition-settings-header {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-shrink: 0;
+          height: 56px;
+          padding: 0 16px;
+          border-bottom: 1px solid var(--divider-color, #e0e0e0);
+        }
+        .edition-settings-icon {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          width: 28px;
+          height: 28px;
+          border-radius: 8px;
+        }
+        .edition-settings-header-text {
+          display: flex;
+          flex-direction: column;
+          flex: 1;
+          min-width: 0;
+          gap: 2px;
+        }
+        .edition-settings-title {
+          font-size: 14px;
+          font-weight: 700;
+          color: var(--primary-text-color, #212121);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .edition-settings-subtitle {
+          font-size: 11px;
+          color: var(--secondary-text-color, #666);
+        }
+        .edition-settings-close {
+          flex-shrink: 0;
+          width: 28px;
+          height: 28px;
+          border-radius: 8px;
+        }
+        .edition-settings-close:hover {
+          background: var(--divider-color, #e0e0e0);
+        }
+        .edition-settings-close svg {
+          width: 16px;
+          height: 16px;
+        }
+        .edition-settings-body {
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+          padding: 16px;
+        }
+        .edition-field-textarea {
+          height: auto;
+          min-height: 72px;
+          padding: 8px 10px;
+          font-family: var(--code-font-family, monospace);
+          resize: vertical;
+        }
+        .edition-settings-separator {
+          flex-shrink: 0;
+          height: 1px;
+          background: var(--divider-color, #e0e0e0);
+        }
+        .edition-field-yaml-preview {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .edition-yaml-preview-block {
+          margin: 0;
+          background: var(--ap-btn-bg, #fff);
+          border: 1px solid var(--divider-color, #e0e0e0);
+          border-radius: 8px;
+          padding: 10px;
+          font-family: var(--code-font-family, monospace);
+          font-size: 11px;
+          line-height: 1.5;
+          color: var(--secondary-text-color, #666);
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        .edition-field-raw-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .edition-field-raw-add {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .edition-raw-add-key {
+          flex: 0 0 40%;
+        }
+        .edition-raw-add-value {
+          flex: 1;
+        }
+        .edition-field-raw-add .icon-button {
+          flex-shrink: 0;
+          width: 32px;
+          height: 32px;
+        }
+        .edition-field-raw-add .icon-button svg {
+          width: 16px;
+          height: 16px;
+        }
+        .edition-settings-footer {
+          display: flex;
+          align-items: center;
+          flex-shrink: 0;
+          height: 56px;
+          padding: 0 16px;
+          border-top: 1px solid var(--divider-color, #e0e0e0);
+        }
+        .edition-settings-delete-btn {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          height: 34px;
+          padding: 0 14px;
+          border: 1px solid var(--divider-color, #e0e0e0);
+          border-radius: 8px;
+          background: var(--ap-btn-bg, #fff);
+          color: var(--secondary-text-color, #666);
+          font-family: inherit;
+          font-size: 13px;
+        }
+        .edition-settings-delete-btn:disabled {
+          opacity: 0.6;
+          pointer-events: none;
+        }
         .edition-liste-central {
           flex: 1;
           min-width: 0;
@@ -2627,6 +3073,14 @@ class AutomationPlusPanel extends HTMLElement {
           border: 1px solid var(--divider-color, #e0e0e0);
           border-radius: 10px;
           background: var(--ap-surface, var(--card-background-color, #fff));
+          cursor: pointer;
+        }
+        /* Sélection du bloc édité (issue #101) — bordure/fond figés en
+           --ap-accent-blue, jamais dérivés du thème (cohérent avec les
+           autres accents interactifs, voir DESIGN-COLORS.md §2). */
+        .edition-block-card.selected {
+          border-color: var(--ap-accent-blue, #03a9f4);
+          background: color-mix(in srgb, var(--ap-accent-blue, #03a9f4) 8%, var(--ap-surface, var(--card-background-color, #fff)));
         }
         .edition-block-card > svg:first-child {
           flex-shrink: 0;
@@ -4025,6 +4479,13 @@ class AutomationPlusPanel extends HTMLElement {
       });
     }
 
+    const discardEditionBtn = root.querySelector('[data-action="discard-edition-changes"]');
+    if (discardEditionBtn) {
+      discardEditionBtn.addEventListener("click", () => {
+        this._editionDiscardChanges();
+      });
+    }
+
     const editionViewSelector = root.querySelector(".edition-view-selector");
     if (editionViewSelector) {
       editionViewSelector.addEventListener("click", (event) => {
@@ -4090,6 +4551,60 @@ class AutomationPlusPanel extends HTMLElement {
         } else if (action === "nav-areas") {
           this._navigateHa("/config/areas/dashboard");
         }
+      });
+    }
+
+    // Panneau Paramètres fonctionnel (issue #101) — un seul conteneur
+    // délégué pour sélection de bloc, fermeture, toggle booléen et ajout de
+    // clé (repli générique), même pattern que .settings-view/.list-container
+    // ci-dessus. .edition-palette reste hors de portée (pointer-events:
+    // none, #102).
+    const editionListeBody = root.querySelector(".edition-liste-body");
+    if (editionListeBody) {
+      editionListeBody.addEventListener("click", (event) => {
+        const toggle = event.target.closest(".edition-field-toggle");
+        if (toggle) {
+          const key = toggle.dataset.fieldKey;
+          const next = toggle.dataset.value !== "true";
+          this._editionSetBlockField(key, "boolean", next);
+          return;
+        }
+
+        const closeBtn = event.target.closest(".edition-settings-close");
+        if (closeBtn) {
+          this._selectedBlock = null;
+          this._render();
+          return;
+        }
+
+        const addRawBtn = event.target.closest('[data-action="add-raw-field"]');
+        if (addRawBtn) {
+          const wrap = addRawBtn.closest(".edition-field-raw-add");
+          const keyInput = wrap && wrap.querySelector(".edition-raw-add-key");
+          const valueInput = wrap && wrap.querySelector(".edition-raw-add-value");
+          if (keyInput && keyInput.value.trim()) {
+            this._editionAddRawField(keyInput.value, valueInput ? valueInput.value : "");
+          }
+          return;
+        }
+
+        const card = event.target.closest(".edition-block-card[data-category]");
+        if (card) {
+          const category = card.dataset.category;
+          const index = Number(card.dataset.index);
+          const already = this._isBlockSelected(category, index);
+          this._selectedBlock = already ? null : { category, index };
+          this._render();
+        }
+      });
+
+      // "change" (blur/validation), pas "input" : un re-render complet à
+      // chaque frappe casserait le focus/curseur en cours de saisie (pas de
+      // rendu partiel dans ce projet, voir plan de l'issue #101).
+      editionListeBody.addEventListener("change", (event) => {
+        const field = event.target.closest("[data-field-key]");
+        if (!field) return;
+        this._editionSetBlockField(field.dataset.fieldKey, field.dataset.fieldType, field.value);
       });
     }
   }

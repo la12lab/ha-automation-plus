@@ -76,7 +76,7 @@ function entityListLabel(hass, entityIdOrList) {
   return ids.filter(Boolean).map((id) => entityLabel(hass, id)).join(", ");
 }
 
-function formatDuration(value) {
+export function formatDuration(value) {
   if (typeof value === "string") return value;
   if (value && typeof value === "object") {
     const parts = [];
@@ -370,49 +370,213 @@ export function describeAction(action, hass) {
 // liste des types disponibles, pas d'une automatisation réelle à décrire.
 export const BLOCK_TYPES = {
   trigger: [
-    { icon: ICON_TOGGLE_RIGHT, title: "État d'une entité" },
-    { icon: ICON_ALARM_CLOCK, title: "Heure" },
-    { icon: ICON_MAP_PIN, title: "Zone" },
-    { icon: ICON_RADIO, title: "Événement HA" },
-    { icon: ICON_CALENDAR, title: "Calendrier" },
-    { icon: ICON_MESSAGE_SQUARE, title: "Phrase (Assist)" },
-    { icon: ICON_CPU, title: "Appareil" },
-    { icon: ICON_CROSSHAIR, title: "Géolocalisation" },
-    { icon: ICON_HOME, title: "Home Assistant" },
-    { icon: ICON_WIFI, title: "MQTT" },
-    { icon: ICON_SIGMA, title: "Valeur numérique" },
-    { icon: ICON_BELL, title: "Notification persistante" },
-    { icon: ICON_SUN, title: "Soleil" },
-    { icon: ICON_TAG, title: "Tag scanné" },
-    { icon: ICON_CODE, title: "Modèle Jinja2" },
-    { icon: ICON_CLOCK, title: "Motif horaire" },
-    { icon: ICON_WEBHOOK, title: "Webhook" },
+    { icon: ICON_TOGGLE_RIGHT, title: "État d'une entité", typeKey: "state" },
+    { icon: ICON_ALARM_CLOCK, title: "Heure", typeKey: "time" },
+    { icon: ICON_MAP_PIN, title: "Zone", typeKey: "zone" },
+    { icon: ICON_RADIO, title: "Événement HA", typeKey: "event" },
+    { icon: ICON_CALENDAR, title: "Calendrier", typeKey: "calendar" },
+    { icon: ICON_MESSAGE_SQUARE, title: "Phrase (Assist)", typeKey: "conversation" },
+    { icon: ICON_CPU, title: "Appareil", typeKey: "device" },
+    { icon: ICON_CROSSHAIR, title: "Géolocalisation", typeKey: "geo_location" },
+    { icon: ICON_HOME, title: "Home Assistant", typeKey: "homeassistant" },
+    { icon: ICON_WIFI, title: "MQTT", typeKey: "mqtt" },
+    { icon: ICON_SIGMA, title: "Valeur numérique", typeKey: "numeric_state" },
+    { icon: ICON_BELL, title: "Notification persistante", typeKey: "persistent_notification" },
+    { icon: ICON_SUN, title: "Soleil", typeKey: "sun" },
+    { icon: ICON_TAG, title: "Tag scanné", typeKey: "tag" },
+    { icon: ICON_CODE, title: "Modèle Jinja2", typeKey: "template" },
+    { icon: ICON_CLOCK, title: "Motif horaire", typeKey: "time_pattern" },
+    { icon: ICON_WEBHOOK, title: "Webhook", typeKey: "webhook" },
   ],
   condition: [
-    { icon: ICON_CIRCLE_CHECK, title: "État" },
-    { icon: ICON_CALENDAR_CLOCK, title: "Plage horaire" },
-    { icon: ICON_SIGMA, title: "Valeur numérique" },
-    { icon: ICON_CODE, title: "Modèle Jinja2" },
-    { icon: ICON_LIST_CHECKS, title: "Et (toutes)" },
-    { icon: ICON_LIST, title: "Ou (au moins une)" },
-    { icon: ICON_BAN, title: "Non (aucune)" },
-    { icon: ICON_CPU, title: "Appareil" },
-    { icon: ICON_SUN, title: "Soleil" },
-    { icon: ICON_FLAG, title: "Déclenché par" },
-    { icon: ICON_MAP_PIN, title: "Zone" },
+    { icon: ICON_CIRCLE_CHECK, title: "État", typeKey: "state" },
+    { icon: ICON_CALENDAR_CLOCK, title: "Plage horaire", typeKey: "time" },
+    { icon: ICON_SIGMA, title: "Valeur numérique", typeKey: "numeric_state" },
+    { icon: ICON_CODE, title: "Modèle Jinja2", typeKey: "template" },
+    { icon: ICON_LIST_CHECKS, title: "Et (toutes)", typeKey: "and" },
+    { icon: ICON_LIST, title: "Ou (au moins une)", typeKey: "or" },
+    { icon: ICON_BAN, title: "Non (aucune)", typeKey: "not" },
+    { icon: ICON_CPU, title: "Appareil", typeKey: "device" },
+    { icon: ICON_SUN, title: "Soleil", typeKey: "sun" },
+    { icon: ICON_FLAG, title: "Déclenché par", typeKey: "trigger" },
+    { icon: ICON_MAP_PIN, title: "Zone", typeKey: "zone" },
   ],
   action: [
-    { icon: ICON_TERMINAL, title: "Appeler un service" },
-    { icon: ICON_HOURGLASS, title: "Attendre" },
-    { icon: ICON_BELL, title: "Notification" },
-    { icon: ICON_SPLIT, title: "Choisir (si/alors)" },
-    { icon: ICON_REPEAT, title: "Répéter" },
-    { icon: ICON_COLUMNS_2, title: "En parallèle" },
-    { icon: ICON_OCTAGON, title: "Arrêter" },
-    { icon: ICON_VARIABLE, title: "Définir des variables" },
-    { icon: ICON_CPU, title: "Appareil" },
-    { icon: ICON_SEND, title: "Déclencher un événement" },
-    { icon: ICON_REPLY, title: "Réponse de conversation" },
-    { icon: ICON_CIRCLE_CHECK, title: "Condition" },
+    { icon: ICON_TERMINAL, title: "Appeler un service", typeKey: "service" },
+    { icon: ICON_HOURGLASS, title: "Attendre", typeKey: "delay" },
+    { icon: ICON_BELL, title: "Notification", typeKey: "notify" },
+    { icon: ICON_SPLIT, title: "Choisir (si/alors)", typeKey: "choose" },
+    { icon: ICON_REPEAT, title: "Répéter", typeKey: "repeat" },
+    { icon: ICON_COLUMNS_2, title: "En parallèle", typeKey: "parallel" },
+    { icon: ICON_OCTAGON, title: "Arrêter", typeKey: "stop" },
+    { icon: ICON_VARIABLE, title: "Définir des variables", typeKey: "variables" },
+    { icon: ICON_CPU, title: "Appareil", typeKey: "device" },
+    { icon: ICON_SEND, title: "Déclencher un événement", typeKey: "event" },
+    { icon: ICON_REPLY, title: "Réponse de conversation", typeKey: "set_conversation_response" },
+    { icon: ICON_CIRCLE_CHECK, title: "Condition", typeKey: "condition" },
   ],
 };
+
+// Détermine le typeKey technique d'un bloc existant — logique dupliquée
+// volontairement de describeTrigger/Condition/Action plutôt que partagée,
+// pour ne pas risquer de régression sur ces fonctions déjà livrées en
+// lecture seule (issue #100). Utilisé uniquement par getBlockFields/
+// buildDefaultBlock ci-dessous, jamais par l'affichage des cards.
+function resolveTypeKey(category, block) {
+  if (category === "trigger") return block.trigger ?? block.platform;
+  if (category === "condition") return block.condition;
+  if (block.service !== undefined || block.action !== undefined) {
+    const service = block.service ?? block.action;
+    return typeof service === "string" && service.startsWith("notify.") ? "notify" : "service";
+  }
+  if (block.delay !== undefined) return "delay";
+  if (block.wait_template !== undefined || block.wait_for_trigger !== undefined) return "wait";
+  if (block.choose !== undefined || block.if !== undefined) return "choose";
+  if (block.repeat !== undefined) return "repeat";
+  if (block.parallel !== undefined) return "parallel";
+  if (block.stop !== undefined) return "stop";
+  if (block.variables !== undefined) return "variables";
+  if (block.device_id !== undefined) return "device";
+  if (block.event !== undefined) return "event";
+  if (block.set_conversation_response !== undefined) return "set_conversation_response";
+  if (block.condition !== undefined) return "condition";
+  return Object.keys(block)[0];
+}
+
+// Schéma de champs éditables par type (issue #100) — vocabulaire de `type`
+// aligné sur les selectors HA (entity/text/number/duration/boolean/select/
+// template), sans en réimplémenter le contrat complet. Couverture
+// volontairement partielle : seuls les types les plus courants ont un vrai
+// schéma ; getBlockFields() applique un repli générique clé→valeur pour
+// tout le reste (jamais de bloc non éditable). `key` accepte un chemin
+// pointé (ex. "target.entity_id") pour un champ imbriqué — voir
+// _editionSetFieldValue()/_editionGetFieldValue() côté panel.
+export const BLOCK_FIELDS = {
+  "trigger:state": {
+    fields: [
+      { key: "entity_id", label: "Entité", type: "entity", required: true },
+      { key: "to", label: "Passe à l'état", type: "text", required: false, placeholder: "ex: on" },
+      { key: "from", label: "Depuis l'état", type: "text", required: false, placeholder: "ex: off" },
+      { key: "for", label: "Pendant (durée)", type: "duration", required: false, placeholder: "HH:MM:SS" },
+    ],
+  },
+  "trigger:time": {
+    fields: [{ key: "at", label: "Heure", type: "text", required: true, placeholder: "HH:MM:SS" }],
+  },
+  "trigger:numeric_state": {
+    fields: [
+      { key: "entity_id", label: "Entité", type: "entity", required: true },
+      { key: "above", label: "Au-dessus de", type: "number", required: false },
+      { key: "below", label: "En dessous de", type: "number", required: false },
+      { key: "for", label: "Pendant (durée)", type: "duration", required: false, placeholder: "HH:MM:SS" },
+    ],
+  },
+  "trigger:template": {
+    fields: [{ key: "value_template", label: "Modèle Jinja2", type: "template", required: true }],
+  },
+  "trigger:event": {
+    fields: [{ key: "event_type", label: "Type d'événement", type: "text", required: true }],
+  },
+  "condition:state": {
+    fields: [
+      { key: "entity_id", label: "Entité", type: "entity", required: true },
+      { key: "state", label: "État attendu", type: "text", required: true, placeholder: "ex: on" },
+    ],
+  },
+  "condition:time": {
+    fields: [
+      { key: "after", label: "Après", type: "text", required: false, placeholder: "HH:MM:SS" },
+      { key: "before", label: "Avant", type: "text", required: false, placeholder: "HH:MM:SS" },
+    ],
+  },
+  "condition:numeric_state": {
+    fields: [
+      { key: "entity_id", label: "Entité", type: "entity", required: true },
+      { key: "above", label: "Au-dessus de", type: "number", required: false },
+      { key: "below", label: "En dessous de", type: "number", required: false },
+    ],
+  },
+  "condition:template": {
+    fields: [{ key: "value_template", label: "Modèle Jinja2", type: "template", required: true }],
+  },
+  "action:service": {
+    fields: [
+      { key: "service", label: "Service", type: "text", required: true, placeholder: "ex: light.turn_on" },
+      { key: "target.entity_id", label: "Entité cible", type: "entity", required: false },
+    ],
+  },
+  "action:delay": {
+    fields: [{ key: "delay", label: "Durée", type: "duration", required: true, placeholder: "HH:MM:SS" }],
+  },
+  "action:event": {
+    fields: [{ key: "event", label: "Type d'événement", type: "text", required: true }],
+  },
+};
+
+// Clés à exclure du repli générique clé→valeur (le discriminant de type
+// lui-même n'est pas un champ éditable). Pas de discriminant unique côté
+// action (le type se déduit de la forme, cf. resolveTypeKey), donc rien à
+// exclure pour cette catégorie.
+const RAW_SKIP_KEYS = {
+  trigger: ["trigger", "platform"],
+  condition: ["condition"],
+  action: [],
+};
+
+// Retourne la description du formulaire à afficher pour un bloc donné :
+// soit le schéma réel ({kind:"schema"}), soit le repli générique clé→valeur
+// ({kind:"raw"}) pour tout type hors BLOCK_FIELDS — jamais de bloc non
+// éditable.
+export function getBlockFields(category, block) {
+  const typeKey = resolveTypeKey(category, block);
+  const schema = BLOCK_FIELDS[`${category}:${typeKey}`];
+  if (schema) return { kind: "schema", typeKey, fields: schema.fields };
+  const skip = RAW_SKIP_KEYS[category] || [];
+  const keys = Object.keys(block).filter((k) => !skip.includes(k));
+  return { kind: "raw", typeKey, keys };
+}
+
+function defaultValueForFieldType(type) {
+  if (type === "number") return 0;
+  if (type === "boolean") return false;
+  return "";
+}
+
+// Construit un bloc par défaut pour un typeKey donné — consommé par la
+// palette fonctionnelle (issue #102, lot différé), écrit ici à côté du
+// schéma qu'il lit (issue #100).
+export function buildDefaultBlock(category, typeKey) {
+  const schema = BLOCK_FIELDS[`${category}:${typeKey}`];
+  const block = {};
+  if (category === "trigger") block.trigger = typeKey;
+  else if (category === "condition") block.condition = typeKey;
+  else if (typeKey === "service") block.service = "";
+  else if (typeKey === "notify") {
+    block.service = "notify.notify";
+    block.data = { message: "" };
+  } else if (typeKey === "delay") block.delay = "";
+  else if (typeKey === "wait") block.wait_template = "";
+  else if (typeKey === "choose") block.choose = [];
+  else if (typeKey === "repeat") block.repeat = { count: 1, sequence: [] };
+  else if (typeKey === "parallel") block.parallel = [];
+  else if (typeKey === "stop") block.stop = "";
+  else if (typeKey === "variables") block.variables = {};
+  else if (typeKey === "device") block.device_id = "";
+  else if (typeKey === "event") block.event = "";
+  else if (typeKey === "set_conversation_response") block.set_conversation_response = "";
+  else if (typeKey === "condition") block.condition = "state";
+  else block[typeKey] = "";
+  if (schema) {
+    for (const field of schema.fields) {
+      if (!field.required) continue;
+      const segments = field.key.split(".");
+      let target = block;
+      for (let i = 0; i < segments.length - 1; i++) {
+        target[segments[i]] = target[segments[i]] ?? {};
+        target = target[segments[i]];
+      }
+      target[segments[segments.length - 1]] = defaultValueForFieldType(field.type);
+    }
+  }
+  return block;
+}

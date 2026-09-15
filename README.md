@@ -61,8 +61,7 @@ Sans date précise — grands axes de développement à venir :
 | 💻 Édition Code | 🔄 | Mode d'édition du YAML brut |
 | 🧩 Édition Bloc | 🔄 | Mode d'édition par blocs |
 | 🔀 Édition Graph | ⚪ | Mode d'édition sous forme de graphe visuel |
-| 📁 Mode dossier dédié | 🔄 | Stockage alternatif en un fichier *.yaml par automatisation |
-| 🧪 Tests automatisés | ⚪ | Couverture de tests sur l'intégration Python |
+| 📁 Mode dossier dédié | ⚪ | Stockage alternatif en un fichier *.yaml par automatisation |
 | 🎨 Personnalisation | ⚪ | Options de personnalisations du panel |
 | 🌐 Traductions anglais | ⚪ | Traduction de l'interface en anglais |
 | 📱 Design responsive smartphone | ⚪ | Adaptation de l'interface aux petits écrans (smartphone) |
