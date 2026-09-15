@@ -18,7 +18,7 @@
 // HA assigne directement les propriétés hass / narrow / panel sur l'élément,
 // pas via des attributs HTML — d'où l'usage de set hass(value) plutôt que attributeChangedCallback.
 
-import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondition, describeAction, getBlockFields, formatDuration } from "./automation-blocks-catalog.js";
+import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondition, describeAction, getBlockFields, formatDuration, getDomainStates } from "./automation-blocks-catalog.js";
 
 // Infos de debug — pas de pipeline de build pour l'instant, donc à tenir à
 // jour manuellement en même temps que manifest.json. DEBUG_VERSION reste
@@ -2364,6 +2364,20 @@ class AutomationPlusPanel extends HTMLElement {
         .map((o) => `<option value="${escapeHtml(o.value)}"${o.value === display ? " selected" : ""}>${escapeHtml(o.label)}</option>`)
         .join("");
       inputHtml = `<select class="detail-select" data-field-key="${keyAttr}" data-field-type="text"><option value=""></option>${options}</select>`;
+    } else if (field.type === "state") {
+      // Suggestions (pas une liste fermée : certaines intégrations ont des
+      // états custom) des états connus pour le domaine de l'entité du bloc —
+      // datalist plutôt que select, même logique que le champ "entity".
+      const listId = `edition-states-${field.key.replace(/[^a-zA-Z0-9]/g, "_")}`;
+      const entityId = this._editionGetFieldValue(block, "entity_id");
+      const domain = String(Array.isArray(entityId) ? entityId[0] : entityId || "").split(".")[0];
+      const stateOptions = getDomainStates(domain)
+        .map((s) => `<option value="${escapeHtml(s)}"></option>`)
+        .join("");
+      inputHtml = `
+        <input type="text" class="detail-input" list="${listId}" data-field-key="${keyAttr}" data-field-type="text" value="${escapeHtml(String(display))}" placeholder="${escapeHtml(field.placeholder || "")}" />
+        <datalist id="${listId}">${stateOptions}</datalist>
+      `;
     } else {
       inputHtml = `<input type="text" class="detail-input" data-field-key="${keyAttr}" data-field-type="text" value="${escapeHtml(String(display))}" placeholder="${escapeHtml(field.placeholder || "")}" />`;
     }

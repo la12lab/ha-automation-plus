@@ -52,6 +52,25 @@ Assistant → **Ajouter l'intégration**.
 
 Le panel apparaît dans la sidebar.
 
+## Page Édition
+
+État actuel de la vue Liste (édition par blocs) — **rien n'est encore
+enregistré sur disque**, toute modification reste en mémoire et est perdue
+au rechargement.
+
+**Éditable**
+- Sélectionner un bloc (déclencheur/condition/action) pour ouvrir son
+  formulaire dans le panneau Paramètres
+- Modifier ses champs (formulaire dédié pour les types courants, sinon
+  clé/valeur brute pour les autres)
+- Annuler pour tout recharger depuis Home Assistant
+
+**Non éditable**
+- Ajouter un bloc depuis la Palette
+- Supprimer un bloc
+- Enregistrer (écriture réelle vers Home Assistant)
+- Annuler/Refaire pas à pas (undo/redo)
+
 ## Roadmap
 
 Sans date précise — grands axes de développement à venir :

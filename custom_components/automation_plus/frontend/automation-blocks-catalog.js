@@ -455,8 +455,8 @@ export const BLOCK_FIELDS = {
   "trigger:state": {
     fields: [
       { key: "entity_id", label: "Entité", type: "entity", required: true },
-      { key: "to", label: "Passe à l'état", type: "text", required: false, placeholder: "ex: on" },
-      { key: "from", label: "Depuis l'état", type: "text", required: false, placeholder: "ex: off" },
+      { key: "to", label: "Passe à l'état", type: "state", required: false, placeholder: "ex: on" },
+      { key: "from", label: "Depuis l'état", type: "state", required: false, placeholder: "ex: off" },
       { key: "for", label: "Pendant (durée)", type: "duration", required: false, placeholder: "HH:MM:SS" },
     ],
   },
@@ -480,7 +480,7 @@ export const BLOCK_FIELDS = {
   "condition:state": {
     fields: [
       { key: "entity_id", label: "Entité", type: "entity", required: true },
-      { key: "state", label: "État attendu", type: "text", required: true, placeholder: "ex: on" },
+      { key: "state", label: "État attendu", type: "state", required: true, placeholder: "ex: on" },
     ],
   },
   "condition:time": {
@@ -512,6 +512,54 @@ export const BLOCK_FIELDS = {
     fields: [{ key: "event", label: "Type d'événement", type: "text", required: true }],
   },
 };
+
+// États connus par domaine d'entité, pour suggérer une liste plutôt qu'un
+// champ 100% texte libre sur les champs de type "state" (trigger:state
+// to/from, condition:state state). Pas exhaustif ni garanti à jour (HA
+// n'expose aucune API pour ça, contrairement aux entités elles-mêmes) —
+// couverture des domaines les plus courants seulement, domaines à valeurs
+// arbitraires (sensor, input_text, input_number...) volontairement absents
+// (pas de liste possible). "unavailable"/"unknown" ajoutés à chaque domaine
+// listé (états génériques que toute entité peut prendre).
+const DOMAIN_STATE_OPTIONS = {
+  light: ["on", "off"],
+  switch: ["on", "off"],
+  binary_sensor: ["on", "off"],
+  input_boolean: ["on", "off"],
+  automation: ["on", "off"],
+  script: ["on", "off"],
+  update: ["on", "off"],
+  fan: ["on", "off"],
+  humidifier: ["on", "off"],
+  siren: ["on", "off"],
+  lock: ["locked", "unlocked", "locking", "unlocking", "jammed"],
+  cover: ["open", "closed", "opening", "closing"],
+  valve: ["open", "closed", "opening", "closing"],
+  climate: ["off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only"],
+  alarm_control_panel: [
+    "armed_home",
+    "armed_away",
+    "armed_night",
+    "armed_vacation",
+    "armed_custom_bypass",
+    "pending",
+    "arming",
+    "disarming",
+    "triggered",
+    "disarmed",
+  ],
+  media_player: ["playing", "paused", "idle", "off", "on", "buffering", "standby"],
+  vacuum: ["cleaning", "docked", "idle", "paused", "returning", "error"],
+  water_heater: ["off", "eco", "electric", "performance", "high_demand", "heat_pump", "gas"],
+  person: ["home", "not_home"],
+  device_tracker: ["home", "not_home"],
+  sun: ["above_horizon", "below_horizon"],
+};
+
+export function getDomainStates(domain) {
+  const known = DOMAIN_STATE_OPTIONS[domain] || [];
+  return [...known, "unavailable", "unknown"];
+}
 
 // Clés à exclure du repli générique clé→valeur (le discriminant de type
 // lui-même n'est pas un champ éditable). Pas de discriminant unique côté
