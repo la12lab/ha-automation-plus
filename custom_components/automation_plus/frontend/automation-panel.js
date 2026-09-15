@@ -379,10 +379,60 @@ class AutomationPlusPanel extends HTMLElement {
     // les blocs composites choose/if ne sont affichés que comme une seule
     // carte, cf. plan). Écriture en mémoire uniquement dans
     // this._editionYaml.config, jamais persistée (dépend de #88/#89/#92).
-    // _editionDirty reflète l'existence d'au moins une modification non
-    // enregistrée depuis le chargement — pilote le bandeau lecture seule.
+    // _editionDirty (accesseur plus bas) et les indicateurs "modifié" (carte
+    // + liseré de groupe) sont TOUS dérivés par comparaison de contenu avec
+    // _editionOriginalConfig (photo de la config au chargement) plutôt que
+    // des drapeaux "a été touché une fois" — sinon revenir à l'état d'origine
+    // (dupliquer puis supprimer, activer puis désactiver...) laisserait le
+    // violet affiché à tort (retour utilisateur, issue #105). Voir
+    // _editionCategoryChanged()/_editionIsBlockModified(). _editionBlockOriginMap
+    // fait correspondre chaque index courant à son index d'origine (ou null
+    // si le bloc n'existait pas à l'origine, ex: duplication) — nécessaire
+    // car les blocs HA n'ont pas d'identifiant stable, seulement une
+    // position dans la liste, qui se décale à chaque insertion/suppression.
     this._selectedBlock = null;
-    this._editionDirty = false;
+    this._editionOriginalConfig = null;
+    this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
+    // Menu kebab par bloc (Dupliquer/Activer-Désactiver/Supprimer, issue
+    // #105) — un seul ouvert à la fois, même pattern que
+    // _optionsMenuOpenFor (menu Options automatisation du Dashboard).
+    this._editionBlockMenuOpenFor = null;
+  }
+
+  // _editionDirty (accesseur, pas un champ) : vrai si au moins une des 3
+  // catégories diffère de _editionOriginalConfig — pilote le bandeau, le
+  // bouton Annuler et (indirectement) Enregistrer en vue Liste.
+  get _editionDirty() {
+    return this._editionCategoryChanged("trigger") || this._editionCategoryChanged("condition") || this._editionCategoryChanged("action");
+  }
+
+  // Compare le CONTENU de la liste courante d'une catégorie à celui
+  // d'origine (via pickList des deux côtés, donc insensible au renommage
+  // singulier→pluriel de _editionMutateList — une simple comparaison de
+  // config brute confondrait ce renommage assumé avec une vraie modification
+  // de contenu). Alimente le liseré de groupe ET l'accesseur _editionDirty.
+  _editionCategoryChanged(category) {
+    const state = this._editionYaml;
+    if (!state || !state.config || !this._editionOriginalConfig) return false;
+    const [singular, plural] = EDITION_LIST_KEYS[category];
+    const current = pickList(state.config, singular, plural);
+    const original = pickList(this._editionOriginalConfig, singular, plural);
+    return JSON.stringify(current) !== JSON.stringify(original);
+  }
+
+  // Un bloc est "modifié" si sa contrepartie d'origine (via
+  // _editionBlockOriginMap) n'existe pas (bloc ajouté/dupliqué, toujours
+  // considéré modifié — il n'existait pas avant) ou si son contenu diffère
+  // de cette contrepartie. Alimente le liseré + la bordure violette de la
+  // carte (issue #105).
+  _editionIsBlockModified(category, index, block) {
+    const map = this._editionBlockOriginMap[category];
+    const originalIndex = map ? map[index] : undefined;
+    if (originalIndex === undefined) return false;
+    if (originalIndex === null) return true;
+    const [singular, plural] = EDITION_LIST_KEYS[category];
+    const original = (this._editionOriginalConfig ? pickList(this._editionOriginalConfig, singular, plural) : [])[originalIndex];
+    return JSON.stringify(block) !== JSON.stringify(original);
   }
 
   // Instantané minimal des entités automation.* pertinentes pour le rendu
@@ -1209,7 +1259,9 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionAutomation = automation;
     this._editionHelpOpen = false;
     this._selectedBlock = null;
-    this._editionDirty = false;
+    this._editionOriginalConfig = null;
+    this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
+    this._editionBlockMenuOpenFor = null;
     this._render();
     this._loadEditionYaml();
   }
@@ -1245,6 +1297,16 @@ class AutomationPlusPanel extends HTMLElement {
         config,
         error: null,
       };
+      // Photo de la config d'origine (clonage profond, jamais mutée
+      // ensuite) + correspondance identité index→index par catégorie, pour
+      // dériver "modifié" par comparaison de contenu plutôt qu'un drapeau
+      // manuel (voir _editionCategoryChanged()/_editionIsBlockModified()).
+      this._editionOriginalConfig = JSON.parse(JSON.stringify(config));
+      this._editionBlockOriginMap = {};
+      for (const category of Object.keys(EDITION_LIST_KEYS)) {
+        const [singular, plural] = EDITION_LIST_KEYS[category];
+        this._editionBlockOriginMap[category] = pickList(config, singular, plural).map((_, i) => i);
+      }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("AutomationPlus: échec du chargement du YAML de l'automatisation", err);
@@ -1328,7 +1390,6 @@ class AutomationPlusPanel extends HTMLElement {
     delete config[singular];
     state.config = config;
     state.lines = this._stringifyYaml(config);
-    this._editionDirty = true;
   }
 
   _editionSetBlockField(key, fieldType, rawValue) {
@@ -1357,6 +1418,84 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionSetBlockField(trimmedKey, "raw", rawValue);
   }
 
+  // Réalignement après une mutation STRUCTURELLE (duplication/suppression,
+  // issue #105) — contrairement à une simple édition de champ, insérer ou
+  // retirer un bloc décale les index de tous les blocs suivants de la même
+  // catégorie. _selectedBlock ET _editionBlockOriginMap (qui fait
+  // correspondre chaque index courant à son index d'origine, voir
+  // _editionIsBlockModified) sont tous deux indexés par position : sans ce
+  // réalignement ils pointeraient sur le mauvais bloc juste après l'opération.
+  _editionOnBlockInserted(category, atIndex) {
+    if (this._selectedBlock && this._selectedBlock.category === category && this._selectedBlock.index >= atIndex) {
+      this._selectedBlock = { category, index: this._selectedBlock.index + 1 };
+    }
+    // null = pas de contrepartie d'origine (bloc ajouté/dupliqué) — toujours
+    // considéré modifié, voir _editionIsBlockModified().
+    this._editionBlockOriginMap[category].splice(atIndex, 0, null);
+  }
+
+  _editionOnBlockRemoved(category, atIndex) {
+    if (this._selectedBlock && this._selectedBlock.category === category) {
+      if (this._selectedBlock.index === atIndex) this._selectedBlock = null;
+      else if (this._selectedBlock.index > atIndex) this._selectedBlock = { category, index: this._selectedBlock.index - 1 };
+    }
+    this._editionBlockOriginMap[category].splice(atIndex, 1);
+  }
+
+  // Menu kebab par bloc (issue #105) : Dupliquer (copie insérée juste après
+  // l'original, toujours activée par défaut même si l'original ne l'était
+  // pas, alias "<nom> (dupliqué)"), Activer/Désactiver (clé HA `enabled`,
+  // réellement supportée sur trigger/condition/action — absente = activé par
+  // défaut) et Supprimer (retrait direct, sans popup — décision explicite,
+  // voir #105 : rien n'est perdu réellement tant que rien n'est enregistré,
+  // Annuler du header permet déjà de tout annuler d'un coup).
+  _editionDuplicateBlock(category, index) {
+    const hass = this._hass;
+    let insertedIndex = null;
+    this._editionMutateList(category, (list) => {
+      const original = list[index];
+      if (!original) return;
+      const clone = JSON.parse(JSON.stringify(original));
+      const described =
+        category === "trigger" ? describeTrigger(original, hass) : category === "condition" ? describeCondition(original, hass) : describeAction(original, hass);
+      const baseName = original.alias || described.title;
+      clone.alias = `${baseName} (dupliqué)`;
+      delete clone.enabled;
+      insertedIndex = index + 1;
+      list.splice(insertedIndex, 0, clone);
+    });
+    if (insertedIndex === null) return;
+    this._editionOnBlockInserted(category, insertedIndex);
+    this._render();
+  }
+
+  _editionToggleBlockEnabled(category, index) {
+    this._editionMutateList(category, (list) => {
+      const block = list[index];
+      if (!block) return;
+      const enabled = block.enabled !== false;
+      if (enabled) block.enabled = false;
+      else delete block.enabled;
+    });
+    this._render();
+  }
+
+  _editionDeleteBlock(category, index) {
+    this._editionMutateList(category, (list) => {
+      list.splice(index, 1);
+    });
+    this._editionOnBlockRemoved(category, index);
+    this._render();
+  }
+
+  _handleEditionBlockMenuAction(action, category, index) {
+    this._editionBlockMenuOpenFor = null;
+    if (action === "duplicate") this._editionDuplicateBlock(category, index);
+    else if (action === "toggle-enabled") this._editionToggleBlockEnabled(category, index);
+    else if (action === "delete") this._editionDeleteBlock(category, index);
+    else this._render();
+  }
+
   _editionEntityOptions() {
     const hass = this._hass;
     if (!hass || !hass.states) return "";
@@ -1374,7 +1513,7 @@ class AutomationPlusPanel extends HTMLElement {
   _editionDiscardChanges() {
     if (!this._editionDirty) return;
     this._selectedBlock = null;
-    this._editionDirty = false;
+    this._editionBlockMenuOpenFor = null;
     this._loadEditionYaml();
   }
 
@@ -2232,38 +2371,80 @@ class AutomationPlusPanel extends HTMLElement {
   // statique (automation-blocks-catalog.js — #22). Cliquable pour la
   // sélectionner et l'éditer dans le Panneau Paramètres (issue #101) — le
   // clic est géré par délégation sur .edition-liste-body, voir
-  // _attachListeners(). Poignée de glisser-déposer et menu kebab affichés
-  // (fidélité visuelle au .pen) mais toujours inertes ce lot (drag-and-drop
-  // et actions par bloc hors périmètre, #102). Pastille d'icône colorée par
-  // catégorie, comme dans le .pen (Carte Déclencheur/Condition/Action de
-  // « Edition automatisation - liste »).
-  _renderEditionBlockCard(category, entry, index, selected) {
+  // _attachListeners(). Poignée de glisser-déposer affichée (fidélité
+  // visuelle au .pen) mais toujours inerte (drag-and-drop hors périmètre,
+  // #102). Toggle actif/inactif (clé HA `enabled`) + menu kebab
+  // Dupliquer/Activer-Désactiver/Supprimer fonctionnels (issue #105).
+  // Pastille d'icône colorée par catégorie, comme dans le .pen (Carte
+  // Déclencheur/Condition/Action de « Edition automatisation - liste »).
+  _renderEditionBlockCard(category, entry, index, selected, modified, enabled) {
+    const menuOpen =
+      this._editionBlockMenuOpenFor && this._editionBlockMenuOpenFor.category === category && this._editionBlockMenuOpenFor.index === index;
     return `
-      <div class="edition-block-card${selected ? " selected" : ""}" data-category="${category}" data-index="${index}">
+      <div class="edition-block-card${selected ? " selected" : ""}${modified ? " modified" : ""}${enabled ? "" : " disabled"}" data-category="${category}" data-index="${index}">
         ${this._icon(ICON_GRIP_VERTICAL, 14)}
         <span class="edition-block-icon edition-block-icon-${category}">${this._icon(entry.icon, 16)}</span>
         <div class="edition-block-text">
           <span class="edition-block-title">${escapeHtml(entry.title)}</span>
           <span class="edition-block-summary">${escapeHtml(entry.summary)}</span>
         </div>
-        <button class="icon-button edition-block-kebab" title="Pas encore disponible" disabled>
-          ${this._icon(ICON_MORE_VERTICAL, 16)}
-        </button>
+        <span class="state-toggle ${enabled ? "on" : "off"}" data-action="toggle-block-enabled" data-category="${category}" data-index="${index}" title="${enabled ? "Cliquer pour désactiver" : "Cliquer pour activer"}">
+          <span class="state-toggle-knob"></span>
+        </span>
+        <div class="options-wrap">
+          <button class="icon-button edition-block-kebab" data-action="block-menu" data-category="${category}" data-index="${index}" title="Options">
+            ${this._icon(ICON_MORE_VERTICAL, 16)}
+          </button>
+          ${menuOpen ? this._renderEditionBlockMenu(category, index, enabled) : ""}
+        </div>
       </div>
+    `;
+  }
+
+  // Menu kebab d'une carte de bloc (issue #105), même style que le menu
+  // Options d'une ligne d'automatisation du Dashboard (_renderOptionsMenu) —
+  // réutilise les mêmes classes .options-menu/.options-menu-item/
+  // .dropdown-backdrop, pas de duplication de CSS.
+  _renderEditionBlockMenu(category, index, enabled) {
+    const items = [
+      { action: "duplicate", icon: ICON_COPY, label: "Dupliquer" },
+      { action: "toggle-enabled", icon: enabled ? ICON_TOGGLE_RIGHT : ICON_TOGGLE_LEFT, label: enabled ? "Désactiver" : "Activer" },
+      { action: "delete", icon: ICON_TRASH, label: "Supprimer", danger: true },
+    ];
+    const itemsHtml = items
+      .map((item) => {
+        const classes = ["options-menu-item", item.danger ? "options-menu-item-danger" : ""].filter(Boolean).join(" ");
+        return `
+          <div class="${classes}" data-action="${item.action}" data-category="${category}" data-index="${index}">
+            ${this._icon(item.icon, 16)}
+            <span>${item.label}</span>
+          </div>
+        `;
+      })
+      .join("");
+    return `
+      <div class="dropdown-backdrop"></div>
+      <div class="options-menu">${itemsHtml}</div>
     `;
   }
 
   // En-tête de groupe : badge pilule coloré par catégorie + ligne de
   // séparation pleine largeur, comme le .pen (Entete Déclencheur/Condition/
-  // Action) — pas un simple libellé en gras.
+  // Action) — pas un simple libellé en gras. Liseré en violet si le contenu
+  // de ce groupe diffère de l'origine (_editionCategoryChanged, comparaison
+  // de contenu — pas un drapeau "a été touché une fois") — reste visible
+  // même après suppression d'un bloc, contrairement au liseré de carte
+  // individuel qui disparaît avec le bloc, mais disparaît lui-même si on
+  // revient au contenu d'origine (retour utilisateur, issue #105).
   _renderEditionGroup(category, icon, title, cardsHtml, addLabel) {
+    const dirty = this._editionCategoryChanged(category);
     return `
       <div class="edition-group">
         <div class="edition-group-header">
           <span class="edition-group-badge edition-group-badge-${category}">
             ${this._icon(icon, 10)}<span>${title}</span>
           </span>
-          <span class="edition-group-divider"></span>
+          <span class="edition-group-divider${dirty ? " modified" : ""}"></span>
         </div>
         <div class="edition-group-cards">${cardsHtml || `<p class="edition-group-empty">Aucun bloc</p>`}</div>
         <button class="edition-group-add" title="Pas encore disponible" disabled>
@@ -2273,16 +2454,32 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
+  // Décrit un bloc via le catalogue, en respectant `alias` (clé HA réelle,
+  // portée par trigger/condition/action) quand présent — sinon le titre
+  // générique par type resterait affiché même après une duplication, qui
+  // pose justement un alias "<nom> (dupliqué)" pour distinguer les deux
+  // blocs à l'écran (issue #105).
+  _editionDescribeBlock(category, block, hass) {
+    const described = category === "trigger" ? describeTrigger(block, hass) : category === "condition" ? describeCondition(block, hass) : describeAction(block, hass);
+    return block.alias ? { ...described, title: block.alias } : described;
+  }
+
   _renderEditionListeGroups(config) {
     const hass = this._hass;
     const triggers = pickList(config, "trigger", "triggers")
-      .map((t, i) => this._renderEditionBlockCard("trigger", describeTrigger(t, hass), i, this._isBlockSelected("trigger", i)))
+      .map((t, i) =>
+        this._renderEditionBlockCard("trigger", this._editionDescribeBlock("trigger", t, hass), i, this._isBlockSelected("trigger", i), this._editionIsBlockModified("trigger", i, t), t.enabled !== false)
+      )
       .join("");
     const conditions = pickList(config, "condition", "conditions")
-      .map((c, i) => this._renderEditionBlockCard("condition", describeCondition(c, hass), i, this._isBlockSelected("condition", i)))
+      .map((c, i) =>
+        this._renderEditionBlockCard("condition", this._editionDescribeBlock("condition", c, hass), i, this._isBlockSelected("condition", i), this._editionIsBlockModified("condition", i, c), c.enabled !== false)
+      )
       .join("");
     const actions = pickList(config, "action", "actions")
-      .map((a, i) => this._renderEditionBlockCard("action", describeAction(a, hass), i, this._isBlockSelected("action", i)))
+      .map((a, i) =>
+        this._renderEditionBlockCard("action", this._editionDescribeBlock("action", a, hass), i, this._isBlockSelected("action", i), this._editionIsBlockModified("action", i, a), a.enabled !== false)
+      )
       .join("");
     return `
       ${this._renderEditionGroup("trigger", ICON_ZAP, "Déclencheur", triggers, "Ajouter un déclencheur")}
@@ -2436,8 +2633,7 @@ class AutomationPlusPanel extends HTMLElement {
     }
     const { category, index } = this._selectedBlock;
     const hass = this._hass;
-    const described =
-      category === "trigger" ? describeTrigger(block, hass) : category === "condition" ? describeCondition(block, hass) : describeAction(block, hass);
+    const described = this._editionDescribeBlock(category, block, hass);
     const fieldsInfo = getBlockFields(category, block);
     const bodyHtml =
       fieldsInfo.kind === "schema"
@@ -2534,6 +2730,13 @@ class AutomationPlusPanel extends HTMLElement {
           --ap-btn-bg: #ffffff;
           --ap-accent-blue: #03a9f4;
           --ap-accent-grey: #8e8e93;
+          /* Bloc ajouté/modifié non enregistré (vue Liste) — violet dédié,
+             distinct des 3 couleurs de catégorie (ambre/bleu/vert) pour ne
+             pas créer d'ambiguïté avec le badge Déclencheur. Prototypé dans
+             le .pen (frame "Carte Bloc — ajouté/modifié (exemple)"). Figé
+             comme les accents ci-dessus, pas de variante sombre dédiée (même
+             logique que --ap-accent-blue/--ap-accent-grey). */
+          --ap-accent-purple: #8e24aa;
           /* Couleurs de catégorie de la vue Édition Liste (#5), reprises du
              .pen (badges/icônes Déclencheur/Condition/Action) — figées comme
              les accents ci-dessus, avec une variante sombre dédiée (voir
@@ -3067,6 +3270,9 @@ class AutomationPlusPanel extends HTMLElement {
           height: 1px;
           background: var(--divider-color, #e0e0e0);
         }
+        .edition-group-divider.modified {
+          background: var(--ap-accent-purple, #8e24aa);
+        }
         .edition-group-cards {
           display: flex;
           flex-direction: column;
@@ -3095,6 +3301,23 @@ class AutomationPlusPanel extends HTMLElement {
         .edition-block-card.selected {
           border-color: var(--ap-accent-blue, #03a9f4);
           background: color-mix(in srgb, var(--ap-accent-blue, #03a9f4) 8%, var(--ap-surface, var(--card-background-color, #fff)));
+        }
+        /* Bloc modifié non enregistré (issue #101, retour utilisateur) :
+           bordure + liseré gauche plus épais en --ap-accent-purple, ordre
+           des règles après .selected pour que la bordure violette prime si
+           le bloc modifié est aussi celui actuellement sélectionné (le fond
+           teinté bleu de .selected reste visible, lui, comme indicateur de
+           sélection active). */
+        .edition-block-card.modified {
+          border-color: var(--ap-accent-purple, #8e24aa);
+          border-left-width: 4px;
+        }
+        /* Bloc désactivé (clé HA enabled:false, issue #105) — même
+           traitement que .automation-row-off (Dashboard) : fond gris figé,
+           pas d'assombrissement du texte/de l'icône (cohérent avec l'écran
+           déjà validé côté Dashboard). */
+        .edition-block-card.disabled {
+          background: var(--ap-off-surface, #e4e4e4);
         }
         .edition-block-card > svg:first-child {
           flex-shrink: 0;
@@ -3142,8 +3365,16 @@ class AutomationPlusPanel extends HTMLElement {
         }
         .edition-block-kebab {
           flex-shrink: 0;
-          opacity: 0.6;
-          pointer-events: none;
+        }
+        .edition-block-card .state-toggle {
+          flex-shrink: 0;
+        }
+        /* .options-wrap porte un margin-left pensé pour la ligne
+           Dashboard (pas de gap sur son conteneur) — neutralisé ici, la
+           carte espace déjà ses enfants via son propre gap:12px. */
+        .edition-block-card .options-wrap {
+          margin-left: 0;
+          flex-shrink: 0;
         }
         .edition-group-add {
           display: flex;
@@ -4305,6 +4536,7 @@ class AutomationPlusPanel extends HTMLElement {
         this._groupMenuOpen = false;
         this._sortMenuOpen = false;
         this._optionsMenuOpenFor = null;
+        this._editionBlockMenuOpenFor = null;
         this._render();
       });
     });
@@ -4601,6 +4833,49 @@ class AutomationPlusPanel extends HTMLElement {
           }
           return;
         }
+
+        // Toggle actif/inactif d'un bloc (issue #105) — avant le fallback
+        // sélection de carte, sinon le clic sur le toggle sélectionnerait
+        // aussi la carte.
+        const blockToggle = event.target.closest('[data-action="toggle-block-enabled"]');
+        if (blockToggle) {
+          this._editionToggleBlockEnabled(blockToggle.dataset.category, Number(blockToggle.dataset.index));
+          return;
+        }
+
+        // Bouton kebab d'une carte de bloc (issue #105) — même logique de
+        // positionnement que le menu Options automatisation du Dashboard
+        // (_positionOptionsMenu, .options-menu en position: fixed).
+        const blockMenuBtn = event.target.closest('[data-action="block-menu"]');
+        if (blockMenuBtn) {
+          const category = blockMenuBtn.dataset.category;
+          const index = Number(blockMenuBtn.dataset.index);
+          const opening =
+            !this._editionBlockMenuOpenFor || this._editionBlockMenuOpenFor.category !== category || this._editionBlockMenuOpenFor.index !== index;
+          this._editionBlockMenuOpenFor = opening ? { category, index } : null;
+          this._render();
+          if (opening) {
+            const menuEl = root.querySelector(".options-menu");
+            const newBtn = menuEl && menuEl.parentElement.querySelector(".edition-block-kebab");
+            if (menuEl && newBtn) {
+              this._positionOptionsMenu(newBtn, menuEl);
+            }
+          }
+          return;
+        }
+
+        // Item du menu kebab bloc (Dupliquer/Activer-Désactiver/Supprimer).
+        const blockMenuItem = event.target.closest(".options-menu-item[data-category]");
+        if (blockMenuItem) {
+          this._handleEditionBlockMenuAction(blockMenuItem.dataset.action, blockMenuItem.dataset.category, Number(blockMenuItem.dataset.index));
+          return;
+        }
+
+        // Le menu kebab ouvert (.options-menu, position: fixed) reste un
+        // descendant DOM de .edition-block-card — exclure toute la zone pour
+        // ne pas déclencher la sélection de carte en cliquant sur son
+        // fond/espacement (même précaution que le menu Options automatisation).
+        if (event.target.closest(".options-menu")) return;
 
         const card = event.target.closest(".edition-block-card[data-category]");
         if (card) {
