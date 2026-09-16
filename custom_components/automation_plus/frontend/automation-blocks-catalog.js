@@ -65,6 +65,28 @@ const ICON_VARIABLE = `<path d="M8 21s-4-3-4-9 4-9 4-9"/><path d="M16 3s4 3 4 9-
 const ICON_SEND = `<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>`;
 const ICON_REPLY = `<path d="M20 18v-2a4 4 0 0 0-4-4H4"/><path d="m9 17-5-5 5-5"/>`;
 
+// Exportés (issue #102, ajustement post-review) pour être réutilisés tels
+// quels par le champ de formulaire "weekday" du Panneau Paramètres côté
+// panel — une seule source pour l'ordre/les libellés des jours.
+export const WEEKDAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+export const WEEKDAY_LABELS = { mon: "Lun", tue: "Mar", wed: "Mer", thu: "Jeu", fri: "Ven", sat: "Sam", sun: "Dim" };
+
+// Résumé des jours d'un trigger "time" (`weekday`) — absent ou 7 jours =
+// "Tous les jours". Sinon, plage contiguë compactée ("Lun-Ven") ou liste
+// des jours retenus, dans l'ordre de la semaine plutôt que l'ordre YAML.
+function formatWeekdays(weekday) {
+  if (!weekday) return "Tous les jours";
+  const days = (Array.isArray(weekday) ? weekday : [weekday]).filter(Boolean);
+  if (!days.length || days.length >= 7) return "Tous les jours";
+  const sorted = WEEKDAY_ORDER.filter((d) => days.includes(d));
+  const indices = sorted.map((d) => WEEKDAY_ORDER.indexOf(d));
+  const isContiguous = indices.every((idx, i) => i === 0 || idx === indices[i - 1] + 1);
+  if (isContiguous && sorted.length > 1) {
+    return `${WEEKDAY_LABELS[sorted[0]]}-${WEEKDAY_LABELS[sorted[sorted.length - 1]]}`;
+  }
+  return sorted.map((d) => WEEKDAY_LABELS[d]).join(", ");
+}
+
 function entityLabel(hass, entityId) {
   if (!entityId) return "";
   const friendly = hass?.states?.[entityId]?.attributes?.friendly_name;
@@ -122,7 +144,7 @@ export function describeTrigger(trigger, hass) {
     }
     case "time": {
       const at = Array.isArray(trigger.at) ? trigger.at.join(", ") : trigger.at;
-      return { icon: ICON_ALARM_CLOCK, title: "Heure", summary: `Tous les jours à ${at ?? "?"}` };
+      return { icon: ICON_ALARM_CLOCK, title: "Heure", summary: `${formatWeekdays(trigger.weekday)} à ${at ?? "?"}` };
     }
     case "zone": {
       const entity = entityListLabel(hass, trigger.entity_id);
@@ -215,7 +237,26 @@ export function describeTrigger(trigger, hass) {
   }
 }
 
-export function describeCondition(condition, hass) {
+// Libellé court d'un trigger pour la résolution de `condition: trigger`
+// (issue #102, ajustement post-review) — privilégie l'alias explicite s'il
+// existe, sinon le titre du catalogue, complété par l'heure pour les
+// triggers "time" (cas le plus courant de ce type de condition).
+function shortTriggerLabel(trigger, hass) {
+  if (trigger.alias) return trigger.alias;
+  const described = describeTrigger(trigger, hass);
+  if (trigger.trigger === "time" && trigger.at !== undefined) {
+    const at = Array.isArray(trigger.at) ? trigger.at.join(", ") : trigger.at;
+    return `${described.title} ${at}`;
+  }
+  return described.title;
+}
+
+// `context.triggers` : liste des déclencheurs de l'automatisation en cours
+// (issue #102, ajustement post-review) — permet à `condition: trigger` de
+// résoudre ses `id` bruts (ex. "t_0545") vers un libellé lisible plutôt que
+// l'identifiant technique. Absent/vide : repli sur l'id brut, comportement
+// inchangé (rétrocompatible avec les appels sans 3e argument).
+export function describeCondition(condition, hass, context) {
   const typeKey = condition.condition;
   switch (typeKey) {
     case "state": {
@@ -277,8 +318,17 @@ export function describeCondition(condition, hass) {
       return { icon: ICON_SUN, title: "Soleil", summary: parts.join(" et ") || "Position du soleil" };
     }
     case "trigger": {
-      const ids = Array.isArray(condition.id) ? condition.id.join(", ") : condition.id;
-      return { icon: ICON_FLAG, title: "Déclenché par", summary: ids ? `Si déclenché par "${ids}"` : "Si déclenché par un trigger précis" };
+      const rawIds = Array.isArray(condition.id) ? condition.id : condition.id ? [condition.id] : [];
+      const triggers = context?.triggers || [];
+      const labels = rawIds.map((id) => {
+        const match = triggers.find((t) => t.id === id);
+        return match ? shortTriggerLabel(match, hass) : id;
+      });
+      return {
+        icon: ICON_FLAG,
+        title: "Déclenché par",
+        summary: labels.length ? `Si déclenché par : ${labels.join(", ")}` : "Si déclenché par un trigger précis",
+      };
     }
     case "zone": {
       const entity = entityListLabel(hass, condition.entity_id);
@@ -461,7 +511,15 @@ export const BLOCK_FIELDS = {
     ],
   },
   "trigger:time": {
-    fields: [{ key: "at", label: "Heure", type: "text", required: true, placeholder: "HH:MM:SS" }],
+    fields: [
+      { key: "at", label: "Heure", type: "text", required: true, placeholder: "HH:MM:SS" },
+      // `weekday` : réellement supporté par la plateforme `time` (constaté
+      // sur une automatisation réelle de l'utilisateur, pas dans la doc
+      // utilisateur HA de base) — absent ou vide = tous les jours, jamais
+      // une liste à cocher vide en pratique (voir _editionSetBlockField,
+      // fieldType "list", qui supprime la clé plutôt que d'écrire `[]`).
+      { key: "weekday", label: "Jours de la semaine", type: "weekday", required: false },
+    ],
   },
   "trigger:numeric_state": {
     fields: [

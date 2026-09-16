@@ -18,15 +18,15 @@
 // HA assigne directement les propriétés hass / narrow / panel sur l'élément,
 // pas via des attributs HTML — d'où l'usage de set hass(value) plutôt que attributeChangedCallback.
 
-import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, describeTrigger, describeCondition, describeAction, getBlockFields, formatDuration, getDomainStates } from "./automation-blocks-catalog.js";
+import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, WEEKDAY_ORDER, WEEKDAY_LABELS, buildDefaultBlock, describeTrigger, describeCondition, describeAction, getBlockFields, formatDuration, getDomainStates } from "./automation-blocks-catalog.js";
 
 // Infos de debug — pas de pipeline de build pour l'instant, donc à tenir à
 // jour manuellement en même temps que manifest.json. DEBUG_VERSION reste
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.4";
-const DEBUG_BUILD_DATE = "2026-09-15";
+const DEBUG_VERSION = "0.8.0-beta.5";
+const DEBUG_BUILD_DATE = "2026-09-16";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
 const ISSUES_URL = `${REPO_URL}/issues`;
@@ -247,6 +247,16 @@ const EDITION_CATEGORY_LABELS = {
   action: "Action",
 };
 
+// Onglets du switcher de catégories de la Sidebar Palette (issue #102,
+// ajustement post-review) — un seul onglet actif affiché à la fois plutôt
+// que les 3 sections empilées, design calqué sur le switcher Liste/Graphe/
+// Code de la toolbar Édition (.edition-segment/.edition-view-selector).
+const EDITION_PALETTE_TABS = [
+  { category: "trigger", icon: ICON_ZAP, label: "Déclencheurs", sectionTitle: "DÉCLENCHEURS" },
+  { category: "condition", icon: ICON_GIT_BRANCH, label: "Conditions", sectionTitle: "CONDITIONS" },
+  { category: "action", icon: ICON_PLAY, label: "Actions", sectionTitle: "ACTIONS" },
+];
+
 // Valide `label.color` (issu du label_registry HA) avant interpolation dans
 // un attribut `style` — escapeHtml() bloque la sortie de l'attribut mais pas
 // une valeur CSS malformée (ex. "red;background:...") qui casserait le rendu
@@ -397,6 +407,14 @@ class AutomationPlusPanel extends HTMLElement {
     // #105) — un seul ouvert à la fois, même pattern que
     // _optionsMenuOpenFor (menu Options automatisation du Dashboard).
     this._editionBlockMenuOpenFor = null;
+    // Requête de la recherche palette (issue #102) — persiste à travers un
+    // _render() complet, remise à zéro seulement à l'ouverture d'une autre
+    // automatisation (_openEdition).
+    this._editionPaletteQuery = "";
+    // Onglet actif du switcher de catégories de la palette (issue #102,
+    // ajustement post-review) — ignoré tant qu'une recherche est en cours
+    // (voir _renderEditionPaletteSections()).
+    this._editionPaletteActiveCategory = "trigger";
   }
 
   // _editionDirty (accesseur, pas un champ) : vrai si au moins une des 3
@@ -1262,6 +1280,8 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionOriginalConfig = null;
     this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
     this._editionBlockMenuOpenFor = null;
+    this._editionPaletteQuery = "";
+    this._editionPaletteActiveCategory = "trigger";
     this._render();
     this._loadEditionYaml();
   }
@@ -1401,6 +1421,11 @@ class AutomationPlusPanel extends HTMLElement {
       if (Number.isNaN(value)) value = undefined;
     } else if (fieldType === "raw") {
       value = this._editionParseRawValue(rawValue);
+    } else if (fieldType === "list") {
+      // Champ "weekday" (issue #102, ajustement post-review) : rawValue est
+      // déjà un tableau (pas de coercion texte→valeur), vide = pas de
+      // restriction HA → clé supprimée plutôt qu'un `[]` explicite.
+      value = Array.isArray(rawValue) && rawValue.length ? rawValue : undefined;
     } else if (fieldType !== "boolean") {
       value = rawValue === "" ? undefined : rawValue;
     }
@@ -1416,6 +1441,20 @@ class AutomationPlusPanel extends HTMLElement {
     const trimmedKey = key.trim();
     if (!trimmedKey || !this._selectedBlock) return;
     this._editionSetBlockField(trimmedKey, "raw", rawValue);
+  }
+
+  // Champ "weekday" (issue #102, ajustement post-review) : bascule un jour
+  // dans/hors du tableau existant plutôt que de remplacer toute la valeur
+  // (chips cliquables individuellement, voir _renderEditionFieldRow()).
+  _editionToggleWeekdayDay(key, day) {
+    const block = this._editionGetSelectedBlock();
+    if (!block) return;
+    const current = this._editionGetFieldValue(block, key);
+    const days = Array.isArray(current) ? [...current] : [];
+    const dayIndex = days.indexOf(day);
+    if (dayIndex === -1) days.push(day);
+    else days.splice(dayIndex, 1);
+    this._editionSetBlockField(key, "list", days);
   }
 
   // Réalignement après une mutation STRUCTURELLE (duplication/suppression,
@@ -1485,6 +1524,27 @@ class AutomationPlusPanel extends HTMLElement {
       list.splice(index, 1);
     });
     this._editionOnBlockRemoved(category, index);
+    this._render();
+  }
+
+  // Insertion depuis la Sidebar Palette (issue #102) : toujours en fin du
+  // groupe top-level (trigger:/condition:/action:), jamais après le bloc
+  // sélectionné ni dans une branche sequence: d'un choose/if existant
+  // (hors périmètre — blocs imbriqués non représentés dans la Zone
+  // Centrale). buildDefaultBlock() (catalogue, #100) pose déjà les champs
+  // requis du schéma. Sélectionne le bloc créé pour ouvrir directement le
+  // Panneau Paramètres — _editionOnBlockInserted() réaligne les index mais
+  // ne sélectionne rien de lui-même, d'où l'affectation explicite après.
+  _editionInsertBlock(category, typeKey) {
+    if (!typeKey) return;
+    let insertedIndex = null;
+    this._editionMutateList(category, (list) => {
+      insertedIndex = list.length;
+      list.push(buildDefaultBlock(category, typeKey));
+    });
+    if (insertedIndex === null) return;
+    this._editionOnBlockInserted(category, insertedIndex);
+    this._selectedBlock = { category, index: insertedIndex };
     this._render();
   }
 
@@ -2342,9 +2402,8 @@ class AutomationPlusPanel extends HTMLElement {
   }
 
   // Contenu de l'onglet Liste : Zone Centrale (3 groupes) pilotée par
-  // données, cartes sélectionnables et Panneau Paramètres fonctionnel en
-  // mémoire (#101). Sidebar Palette toujours grisée/inerte (ajout de bloc
-  // hors périmètre, #102).
+  // données, cartes sélectionnables, Panneau Paramètres et Sidebar Palette
+  // (ajout de bloc + suppression) fonctionnels en mémoire (#101/#102).
   _renderEditionListe() {
     const state = this._editionYaml;
     let centralHtml;
@@ -2372,9 +2431,11 @@ class AutomationPlusPanel extends HTMLElement {
   // sélectionner et l'éditer dans le Panneau Paramètres (issue #101) — le
   // clic est géré par délégation sur .edition-liste-body, voir
   // _attachListeners(). Poignée de glisser-déposer affichée (fidélité
-  // visuelle au .pen) mais toujours inerte (drag-and-drop hors périmètre,
-  // #102). Toggle actif/inactif (clé HA `enabled`) + menu kebab
-  // Dupliquer/Activer-Désactiver/Supprimer fonctionnels (issue #105).
+  // visuelle au .pen) mais toujours inerte (réordonnancement drag-and-drop
+  // toujours hors périmètre — étape 5 de la feuille de route
+  // ARCHITECTURE.md §9, distincte de la palette #102). Toggle actif/inactif
+  // (clé HA `enabled`) + menu kebab Dupliquer/Activer-Désactiver/Supprimer
+  // fonctionnels (issue #105).
   // Pastille d'icône colorée par catégorie, comme dans le .pen (Carte
   // Déclencheur/Condition/Action de « Edition automatisation - liste »).
   _renderEditionBlockCard(category, entry, index, selected, modified, enabled) {
@@ -2447,7 +2508,7 @@ class AutomationPlusPanel extends HTMLElement {
           <span class="edition-group-divider${dirty ? " modified" : ""}"></span>
         </div>
         <div class="edition-group-cards">${cardsHtml || `<p class="edition-group-empty">Aucun bloc</p>`}</div>
-        <button class="edition-group-add" title="Pas encore disponible" disabled>
+        <button class="edition-group-add" data-action="focus-palette-category" data-category="${category}" title="Choisir dans la Palette">
           ${this._icon(ICON_PLUS, 14)}<span>${addLabel}</span>
         </button>
       </div>
@@ -2459,21 +2520,35 @@ class AutomationPlusPanel extends HTMLElement {
   // générique par type resterait affiché même après une duplication, qui
   // pose justement un alias "<nom> (dupliqué)" pour distinguer les deux
   // blocs à l'écran (issue #105).
-  _editionDescribeBlock(category, block, hass) {
-    const described = category === "trigger" ? describeTrigger(block, hass) : category === "condition" ? describeCondition(block, hass) : describeAction(block, hass);
+  // `context.triggers` (issue #102, ajustement post-review) : uniquement
+  // consommé par describeCondition() pour résoudre les `id` bruts de
+  // `condition: trigger` vers un libellé lisible — undefined pour trigger/
+  // action, sans effet (describeCondition() gère son absence).
+  _editionDescribeBlock(category, block, hass, context) {
+    const described =
+      category === "trigger" ? describeTrigger(block, hass) : category === "condition" ? describeCondition(block, hass, context) : describeAction(block, hass);
     return block.alias ? { ...described, title: block.alias } : described;
   }
 
   _renderEditionListeGroups(config) {
     const hass = this._hass;
-    const triggers = pickList(config, "trigger", "triggers")
+    const triggerList = pickList(config, "trigger", "triggers");
+    const conditionContext = { triggers: triggerList };
+    const triggers = triggerList
       .map((t, i) =>
         this._renderEditionBlockCard("trigger", this._editionDescribeBlock("trigger", t, hass), i, this._isBlockSelected("trigger", i), this._editionIsBlockModified("trigger", i, t), t.enabled !== false)
       )
       .join("");
     const conditions = pickList(config, "condition", "conditions")
       .map((c, i) =>
-        this._renderEditionBlockCard("condition", this._editionDescribeBlock("condition", c, hass), i, this._isBlockSelected("condition", i), this._editionIsBlockModified("condition", i, c), c.enabled !== false)
+        this._renderEditionBlockCard(
+          "condition",
+          this._editionDescribeBlock("condition", c, hass, conditionContext),
+          i,
+          this._isBlockSelected("condition", i),
+          this._editionIsBlockModified("condition", i, c),
+          c.enabled !== false
+        )
       )
       .join("");
     const actions = pickList(config, "action", "actions")
@@ -2488,16 +2563,18 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
-  // Sidebar gauche "ajouter un bloc" — placeholder statique grisé, sans
-  // logique de recherche/ajout (édition non disponible dans ce lot, #5).
-  // Liste réelle des 40 types pilotée par BLOCK_TYPES (catalogue statique,
-  // #22) plutôt qu'en dur ici, fidèle au contenu à plat du .pen (pas de
-  // catégories repliables).
-  _renderEditionPaletteSection(icon, title, items) {
+  // Sidebar gauche "ajouter un bloc" (issue #102) : clic sur un item insère
+  // réellement un bloc via _editionInsertBlock() (délégué sur
+  // .edition-liste-body, voir _attachListeners()). Liste réelle des 40
+  // types pilotée par BLOCK_TYPES (catalogue statique, #22), fidèle au
+  // contenu à plat du .pen (pas de catégories repliables). `category` porté
+  // par data-category/data-type-key sur chaque item pour le handler de clic.
+  _renderEditionPaletteSection(category, icon, title, items) {
+    if (!items.length) return "";
     const itemsHtml = items
       .map(
         (item) => `
-          <div class="edition-palette-item">
+          <div class="edition-palette-item" data-action="insert-block" data-category="${category}" data-type-key="${escapeHtml(item.typeKey)}" title="Ajouter : ${escapeHtml(item.title)}">
             ${this._icon(item.icon, 15)}<span>${escapeHtml(item.title)}</span>${this._icon(ICON_PLUS, 13)}
           </div>
         `
@@ -2511,16 +2588,76 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
+  // Filtre insensible à la casse/aux accents sur le titre et la clé de type
+  // (issue #102) — comparaison simple `includes`, pas de recherche floue.
+  _editionFilterBlockTypes(items, query) {
+    const normalized = query
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "");
+    if (!normalized) return items;
+    return items.filter((item) => {
+      const haystack = `${item.title} ${item.typeKey}`
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "");
+      return haystack.includes(normalized);
+    });
+  }
+
+  // Switcher de catégories (issue #102, ajustement post-review) — mêmes
+  // classes de base que .edition-segment/.edition-view-selector (toolbar
+  // Édition), réutilisées à l'identique pour la cohérence visuelle. Grisé
+  // et inerte tant qu'une recherche est en cours (this._editionPaletteQuery)
+  // : la recherche bascule alors en mode "toutes catégories confondues",
+  // voir _renderEditionPaletteSections().
+  _renderEditionPaletteTabs(searching) {
+    const itemsHtml = EDITION_PALETTE_TABS.map(
+      (tab) => `
+        <div class="edition-palette-tab${tab.category === this._editionPaletteActiveCategory ? " active" : ""}" data-action="palette-tab" data-category="${tab.category}">
+          ${this._icon(tab.icon, 14)}<span>${tab.label}</span>
+        </div>
+      `
+    ).join("");
+    return `<div class="edition-palette-tabs${searching ? " disabled" : ""}">${itemsHtml}</div>`;
+  }
+
+  // Sections affichées sous le switcher (issue #102, ajustement post-review)
+  // — factorisé pour être réutilisé par le rendu complet ET par le patch
+  // DOM ciblé de la recherche (voir _attachListeners(), listener "input"),
+  // qui ne doit jamais reconstruire l'input lui-même sous peine de perdre
+  // le focus/curseur en cours de frappe. Deux modes :
+  // - recherche active (query non vide) : les 3 catégories confondues,
+  //   filtrées — le switcher est alors grisé (voir _renderEditionPaletteTabs).
+  // - pas de recherche : uniquement la catégorie de l'onglet actif, non
+  //   filtrée (toujours au moins 1 type par catégorie, jamais d'état vide
+  //   dans ce mode).
+  _renderEditionPaletteSections() {
+    const query = this._editionPaletteQuery;
+    if (query.trim()) {
+      const sectionsHtml = EDITION_PALETTE_TABS.map((tab) =>
+        this._renderEditionPaletteSection(tab.category, tab.icon, tab.sectionTitle, this._editionFilterBlockTypes(BLOCK_TYPES[tab.category], query))
+      ).join("");
+      if (!sectionsHtml) {
+        return `<p class="edition-palette-empty">Aucun type de bloc ne correspond à « ${escapeHtml(query.trim())} ».</p>`;
+      }
+      return sectionsHtml;
+    }
+    const activeTab = EDITION_PALETTE_TABS.find((tab) => tab.category === this._editionPaletteActiveCategory) || EDITION_PALETTE_TABS[0];
+    return this._renderEditionPaletteSection(activeTab.category, activeTab.icon, activeTab.sectionTitle, BLOCK_TYPES[activeTab.category]);
+  }
+
   _renderEditionPalette() {
+    const searching = this._editionPaletteQuery.trim().length > 0;
     return `
       <div class="edition-palette">
         <div class="edition-palette-search">
           ${this._icon(ICON_SEARCH, 15)}
-          <input type="text" placeholder="Rechercher un bloc..." disabled />
+          <input type="text" class="edition-palette-search-input" placeholder="Rechercher un bloc..." value="${escapeHtml(this._editionPaletteQuery)}" />
         </div>
-        ${this._renderEditionPaletteSection(ICON_ZAP, "DÉCLENCHEURS", BLOCK_TYPES.trigger)}
-        ${this._renderEditionPaletteSection(ICON_GIT_BRANCH, "CONDITIONS", BLOCK_TYPES.condition)}
-        ${this._renderEditionPaletteSection(ICON_PLAY, "ACTIONS", BLOCK_TYPES.action)}
+        ${this._renderEditionPaletteTabs(searching)}
+        <div class="edition-palette-sections">${this._renderEditionPaletteSections()}</div>
         <span class="edition-palette-footer">Registre blocs · HA ${BLOCK_REGISTRY_HA_VERSION}</span>
       </div>
     `;
@@ -2561,6 +2698,14 @@ class AutomationPlusPanel extends HTMLElement {
         .map((o) => `<option value="${escapeHtml(o.value)}"${o.value === display ? " selected" : ""}>${escapeHtml(o.label)}</option>`)
         .join("");
       inputHtml = `<select class="detail-select" data-field-key="${keyAttr}" data-field-type="text"><option value=""></option>${options}</select>`;
+    } else if (field.type === "weekday") {
+      const selectedDays = Array.isArray(value) ? value : [];
+      const chipsHtml = WEEKDAY_ORDER.map(
+        (day) => `
+          <button type="button" class="edition-field-weekday-chip${selectedDays.includes(day) ? " active" : ""}" data-action="toggle-weekday" data-field-key="${keyAttr}" data-day="${day}">${WEEKDAY_LABELS[day]}</button>
+        `
+      ).join("");
+      inputHtml = `<div class="edition-field-weekday-chips">${chipsHtml}</div>`;
     } else if (field.type === "state") {
       // Suggestions (pas une liste fermée : certaines intégrations ont des
       // états custom) des états connus pour le domaine de l'entité du bloc —
@@ -2617,8 +2762,9 @@ class AutomationPlusPanel extends HTMLElement {
   // Panneau droit "paramètres du bloc" (issue #101) : état vide inchangé
   // tant qu'aucun bloc n'est sélectionné, formulaire dynamique (schéma réel
   // ou repli clé→valeur générique) sinon. Écriture 100% en mémoire dans
-  // this._editionYaml.config — pas de bouton "Supprimer le bloc" fonctionnel
-  // ce lot (affiché désactivé, activation prévue avec la palette, #102).
+  // this._editionYaml.config. Bouton "Supprimer le bloc" fonctionnel
+  // (issue #102), réutilise _editionDeleteBlock() tel quel (menu kebab,
+  // #105) — pas de popup de confirmation, même décision explicite.
   _renderEditionSettingsPanel() {
     const block = this._editionGetSelectedBlock();
     if (!this._selectedBlock || !block) {
@@ -2633,8 +2779,21 @@ class AutomationPlusPanel extends HTMLElement {
     }
     const { category, index } = this._selectedBlock;
     const hass = this._hass;
-    const described = this._editionDescribeBlock(category, block, hass);
+    const conditionContext = category === "condition" ? { triggers: pickList(this._editionYaml.config, "trigger", "triggers") } : undefined;
+    const described = this._editionDescribeBlock(category, block, hass, conditionContext);
     const fieldsInfo = getBlockFields(category, block);
+    // Champ "id" (ajustement post-review) : uniquement pour les triggers —
+    // vérifié via la doc officielle HA (find-docs/Context7) : `id` n'est un
+    // champ documenté QUE pour les triggers (référencé ensuite par
+    // `condition: trigger`), pas pour les conditions/actions, qui utilisent
+    // `alias` pour l'identification. L'afficher pour condition/action serait
+    // trompeur (clé inconnue, silencieusement ignorée par HA, aucun effet).
+    // Réutilise _renderEditionFieldRow() comme n'importe quel champ texte :
+    // écriture déjà générique via l'écouteur "change" existant
+    // (data-field-key/data-field-type), aucun nouveau branchement requis.
+    const idFieldHtml =
+      category === "trigger" ? this._renderEditionFieldRow(block, { key: "id", label: "ID", type: "text", required: false, placeholder: "ex: t_0545" }) : "";
+    const idSeparatorHtml = idFieldHtml ? `<div class="edition-settings-separator"></div>` : "";
     const bodyHtml =
       fieldsInfo.kind === "schema"
         ? fieldsInfo.fields.map((field) => this._renderEditionFieldRow(block, field)).join("")
@@ -2655,6 +2814,8 @@ class AutomationPlusPanel extends HTMLElement {
           </button>
         </div>
         <div class="scroll-area edition-settings-body">
+          ${idFieldHtml}
+          ${idSeparatorHtml}
           ${bodyHtml}
           <div class="edition-settings-separator"></div>
           <div class="edition-field-yaml-preview">
@@ -2663,7 +2824,7 @@ class AutomationPlusPanel extends HTMLElement {
           </div>
         </div>
         <div class="edition-settings-footer">
-          <button class="edition-settings-delete-btn" title="Pas encore disponible" disabled>
+          <button class="edition-settings-delete-btn" data-action="delete-block" title="Supprimer le bloc">
             ${this._icon(ICON_TRASH, 14)}<span>Supprimer le bloc</span>
           </button>
         </div>
@@ -2964,12 +3125,10 @@ class AutomationPlusPanel extends HTMLElement {
           color: var(--primary-text-color, #212121);
           white-space: pre;
         }
-        /* Vue Liste (#5) — Sidebar Palette et Panneau Paramètres affichés
-           mais inertes (opacity + pointer-events: none), fidèles aux
+        /* Vue Liste (#5) — Sidebar Palette, Zone Centrale et Panneau
+           Paramètres tous fonctionnels en mémoire (#101/#102), fidèles aux
            dimensions et à la structure du .pen (« Edition automatisation -
-           liste ») : palette 300px, panneau paramètres 340px. Seule la Zone
-           Centrale (3 groupes) est réellement pilotée par les données de
-           l'automatisation. */
+           liste ») : palette 300px, panneau paramètres 340px. */
         .edition-liste-body {
           display: flex;
           flex: 1;
@@ -2977,8 +3136,6 @@ class AutomationPlusPanel extends HTMLElement {
         }
         .edition-palette {
           flex-shrink: 0;
-          opacity: 0.65;
-          pointer-events: none;
         }
         .edition-settings-panel {
           flex-shrink: 0;
@@ -2992,6 +3149,17 @@ class AutomationPlusPanel extends HTMLElement {
           background: var(--ap-surface, var(--card-background-color, #fff));
           border-right: 1px solid var(--divider-color, #e0e0e0);
           overflow-y: auto;
+        }
+        /* Conteneur des sections affichées sous le switcher (issue #102,
+           ajustement post-review) — display:flex/gap explicite : en mode
+           recherche "toutes catégories" (_renderEditionPaletteSections()),
+           plusieurs .edition-palette-section peuvent être des enfants
+           directs et se retrouvaient collées les unes aux autres (bug
+           visuel remonté par l'utilisateur, aucun gap sans cette règle). */
+        .edition-palette-sections {
+          display: flex;
+          flex-direction: column;
+          gap: 20px;
         }
         .edition-palette-search {
           display: flex;
@@ -3012,6 +3180,42 @@ class AutomationPlusPanel extends HTMLElement {
           outline: none;
           font-size: 13px;
           color: var(--primary-text-color, #212121);
+        }
+        /* Switcher de catégories (issue #102, ajustement post-review) —
+           mêmes couleurs/rayon/ombre que .edition-segment (toolbar Édition,
+           switch Liste/Graphe/Code), réutilisées à l'identique. Seule
+           différence : icône empilée au-dessus du label (pas côte à côte)
+           pour tenir sur 1/3 des 300px de la palette sans débordement. */
+        .edition-palette-tabs {
+          display: flex;
+          align-items: center;
+          gap: 2px;
+          padding: 3px;
+          background: var(--secondary-background-color, #f1f3f4);
+          border-radius: 9px;
+          flex-shrink: 0;
+        }
+        .edition-palette-tabs.disabled {
+          opacity: 0.5;
+          pointer-events: none;
+        }
+        .edition-palette-tab {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+          padding: 6px 4px;
+          border-radius: 6px;
+          font-size: 11px;
+          color: var(--secondary-text-color, #666);
+          cursor: pointer;
+        }
+        .edition-palette-tab.active {
+          background: var(--ap-btn-bg, #fff);
+          color: var(--primary-text-color, #212121);
+          font-weight: 700;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.13);
         }
         .edition-palette-section {
           display: flex;
@@ -3043,10 +3247,25 @@ class AutomationPlusPanel extends HTMLElement {
           background: var(--primary-background-color, #fafafa);
           color: var(--secondary-text-color, #666);
           font-size: 13px;
+          cursor: pointer;
+        }
+        .edition-palette-item:hover {
+          background: var(--ap-off-surface, var(--secondary-background-color, #f0f0f0));
+          border-color: var(--ap-accent-blue, var(--primary-color, #4f8eff));
+        }
+        .edition-palette-item:active {
+          background: var(--ap-surface, var(--card-background-color, #fff));
         }
         .edition-palette-item span {
           flex: 1;
           color: var(--primary-text-color, #212121);
+        }
+        .edition-palette-empty {
+          margin: 0;
+          padding: 12px 4px;
+          font-size: 12px;
+          color: var(--secondary-text-color, #666);
+          text-align: center;
         }
         .edition-palette-footer {
           margin-top: auto;
@@ -3148,6 +3367,38 @@ class AutomationPlusPanel extends HTMLElement {
           font-family: var(--code-font-family, monospace);
           resize: vertical;
         }
+        /* Champ "weekday" (issue #102, ajustement post-review, ex.
+           trigger:time) — 7 chips égales, même logique de couleur active
+           que .status-chip.active[data-value="on"] (--ap-accent-blue). */
+        .edition-field-weekday-chips {
+          display: flex;
+          gap: 4px;
+        }
+        .edition-field-weekday-chip {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 24px;
+          padding: 0;
+          border: 1px solid var(--divider-color, #e0e0e0);
+          border-radius: 8px;
+          background: var(--ap-btn-bg, #fff);
+          color: var(--secondary-text-color, #666);
+          font-family: inherit;
+          font-size: 12px;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .edition-field-weekday-chip:hover {
+          background: var(--ap-off-surface, var(--secondary-background-color, #f0f0f0));
+        }
+        .edition-field-weekday-chip.active {
+          background: var(--ap-accent-blue, #03a9f4);
+          border-color: var(--ap-accent-blue, #03a9f4);
+          color: #fff;
+          font-weight: 700;
+        }
         .edition-settings-separator {
           flex-shrink: 0;
           height: 1px;
@@ -3199,6 +3450,7 @@ class AutomationPlusPanel extends HTMLElement {
         .edition-settings-footer {
           display: flex;
           align-items: center;
+          justify-content: center;
           flex-shrink: 0;
           height: 56px;
           padding: 0 16px;
@@ -3210,16 +3462,12 @@ class AutomationPlusPanel extends HTMLElement {
           gap: 6px;
           height: 34px;
           padding: 0 14px;
-          border: 1px solid var(--divider-color, #e0e0e0);
+          border: 1px solid var(--error-color, #c62828);
           border-radius: 8px;
           background: var(--ap-btn-bg, #fff);
           color: var(--secondary-text-color, #666);
           font-family: inherit;
           font-size: 13px;
-        }
-        .edition-settings-delete-btn:disabled {
-          opacity: 0.6;
-          pointer-events: none;
         }
         .edition-liste-central {
           flex: 1;
@@ -3388,10 +3636,10 @@ class AutomationPlusPanel extends HTMLElement {
           color: var(--secondary-text-color, #666);
           font-family: inherit;
           font-size: 13px;
+          cursor: pointer;
         }
-        .edition-group-add:disabled {
-          opacity: 0.6;
-          pointer-events: none;
+        .edition-group-add:hover {
+          background: var(--ap-off-surface, var(--secondary-background-color, #f0f0f0));
         }
         .popup-card.popup-edition-help {
           max-width: 440px;
@@ -4800,11 +5048,11 @@ class AutomationPlusPanel extends HTMLElement {
       });
     }
 
-    // Panneau Paramètres fonctionnel (issue #101) — un seul conteneur
-    // délégué pour sélection de bloc, fermeture, toggle booléen et ajout de
+    // Panneau Paramètres + Sidebar Palette fonctionnels (issues #101/#102)
+    // — un seul conteneur délégué pour sélection/suppression de bloc,
+    // insertion depuis la palette, fermeture, toggle booléen et ajout de
     // clé (repli générique), même pattern que .settings-view/.list-container
-    // ci-dessus. .edition-palette reste hors de portée (pointer-events:
-    // none, #102).
+    // ci-dessus.
     const editionListeBody = root.querySelector(".edition-liste-body");
     if (editionListeBody) {
       editionListeBody.addEventListener("click", (event) => {
@@ -4816,9 +5064,58 @@ class AutomationPlusPanel extends HTMLElement {
           return;
         }
 
+        // Chip d'un jour du champ "weekday" (issue #102, ajustement
+        // post-review, ex. trigger:time) — bascule ce jour dans/hors du
+        // tableau, les autres jours ne sont jamais touchés.
+        const weekdayChip = event.target.closest('[data-action="toggle-weekday"]');
+        if (weekdayChip) {
+          this._editionToggleWeekdayDay(weekdayChip.dataset.fieldKey, weekdayChip.dataset.day);
+          return;
+        }
+
         const closeBtn = event.target.closest(".edition-settings-close");
         if (closeBtn) {
           this._selectedBlock = null;
+          this._render();
+          return;
+        }
+
+        // Bouton "Supprimer le bloc" du Panneau Paramètres (issue #102) —
+        // réutilise _editionDeleteBlock() tel quel (menu kebab, #105).
+        const deleteBtn = event.target.closest('[data-action="delete-block"]');
+        if (deleteBtn) {
+          if (!this._selectedBlock) return;
+          this._editionDeleteBlock(this._selectedBlock.category, this._selectedBlock.index);
+          return;
+        }
+
+        // Item de la Sidebar Palette (issue #102) — insertion en fin du
+        // groupe top-level correspondant, sélection automatique du bloc créé.
+        const paletteItem = event.target.closest('.edition-palette-item[data-action="insert-block"]');
+        if (paletteItem) {
+          this._editionInsertBlock(paletteItem.dataset.category, paletteItem.dataset.typeKey);
+          return;
+        }
+
+        // Onglet du switcher de catégories palette (issue #102, ajustement
+        // post-review) — grisé/inerte pendant une recherche (voir CSS
+        // .edition-palette-tabs.disabled), donc rien à vérifier de plus ici.
+        const paletteTab = event.target.closest('.edition-palette-tab[data-action="palette-tab"]');
+        if (paletteTab) {
+          this._editionPaletteActiveCategory = paletteTab.dataset.category;
+          this._render();
+          return;
+        }
+
+        // Bouton "Ajouter un déclencheur/condition/action" en bas de chaque
+        // groupe de la Zone Centrale (issue #102, ajustement post-review) —
+        // redirige vers la Palette plutôt qu'un popup dédié (décision
+        // explicite) : bascule l'onglet sur la catégorie correspondante et
+        // efface une recherche en cours pour la rendre immédiatement visible.
+        const focusPaletteBtn = event.target.closest('[data-action="focus-palette-category"]');
+        if (focusPaletteBtn) {
+          this._editionPaletteActiveCategory = focusPaletteBtn.dataset.category;
+          this._editionPaletteQuery = "";
           this._render();
           return;
         }
@@ -4894,6 +5191,26 @@ class AutomationPlusPanel extends HTMLElement {
         const field = event.target.closest("[data-field-key]");
         if (!field) return;
         this._editionSetBlockField(field.dataset.fieldKey, field.dataset.fieldType, field.value);
+      });
+
+      // Recherche de la Sidebar Palette (issue #102) : "input" pour un
+      // filtrage live, mais SANS passer par _render() (qui reconstruit tout
+      // .edition-liste-body et casserait le focus/curseur de cet input en
+      // cours de frappe, même raison que le "change" ci-dessus) — patch DOM
+      // ciblé sur .edition-palette-sections uniquement, l'input et le
+      // footer de la palette ne sont jamais touchés. Le switcher de
+      // catégories (issue #102, ajustement post-review) bascule en mode
+      // "toutes catégories" pendant la recherche : grisé/inerte via la
+      // classe .disabled, sans reconstruire ses nœuds.
+      editionListeBody.addEventListener("input", (event) => {
+        const searchInput = event.target.closest(".edition-palette-search-input");
+        if (!searchInput) return;
+        this._editionPaletteQuery = searchInput.value;
+        const searching = searchInput.value.trim().length > 0;
+        const tabs = editionListeBody.querySelector(".edition-palette-tabs");
+        if (tabs) tabs.classList.toggle("disabled", searching);
+        const sections = editionListeBody.querySelector(".edition-palette-sections");
+        if (sections) sections.innerHTML = this._renderEditionPaletteSections();
       });
     }
   }
