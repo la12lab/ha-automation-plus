@@ -25,7 +25,7 @@ import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, WEEKDAY_ORDER, WEEKDAY_LABELS, 
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.5";
+const DEBUG_VERSION = "0.8.0-beta.6";
 const DEBUG_BUILD_DATE = "2026-09-16";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
@@ -440,14 +440,18 @@ class AutomationPlusPanel extends HTMLElement {
 
   // Un bloc est "modifié" si sa contrepartie d'origine (via
   // _editionBlockOriginMap) n'existe pas (bloc ajouté/dupliqué, toujours
-  // considéré modifié — il n'existait pas avant) ou si son contenu diffère
-  // de cette contrepartie. Alimente le liseré + la bordure violette de la
-  // carte (issue #105).
+  // considéré modifié — il n'existait pas avant), si sa POSITION diffère de
+  // celle d'origine (issue #110, retour utilisateur : un glisser-déposer pur
+  // ne change aucun contenu, donc sans ce cas le seul signal visuel restant
+  // était le liseré de groupe — 1px, imperceptible en pratique) ou si son
+  // contenu diffère de cette contrepartie. Alimente le liseré + la bordure
+  // violette de la carte (issue #105).
   _editionIsBlockModified(category, index, block) {
     const map = this._editionBlockOriginMap[category];
     const originalIndex = map ? map[index] : undefined;
     if (originalIndex === undefined) return false;
     if (originalIndex === null) return true;
+    if (originalIndex !== index) return true;
     const [singular, plural] = EDITION_LIST_KEYS[category];
     const original = (this._editionOriginalConfig ? pickList(this._editionOriginalConfig, singular, plural) : [])[originalIndex];
     return JSON.stringify(block) !== JSON.stringify(original);
@@ -1481,6 +1485,36 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionBlockOriginMap[category].splice(atIndex, 1);
   }
 
+  // Réalignement après un glisser-déposer (issue #110) — volontairement pas
+  // exprimé comme un retrait+insertion enchaînés (_editionOnBlockRemoved puis
+  // _editionOnBlockInserted) : un déplacement du bloc actuellement sélectionné
+  // doit RESTER sélectionné à sa nouvelle position, alors qu'un retrait pur
+  // désélectionne toujours (comportement voulu pour la suppression, pas ici).
+  _editionOnBlockMoved(category, fromIndex, toIndex) {
+    if (fromIndex === toIndex) return;
+    const map = this._editionBlockOriginMap[category];
+    const [movedOrigin] = map.splice(fromIndex, 1);
+    map.splice(toIndex, 0, movedOrigin);
+    if (this._selectedBlock && this._selectedBlock.category === category) {
+      const i = this._selectedBlock.index;
+      let next = i;
+      if (i === fromIndex) next = toIndex;
+      else if (fromIndex < i && i <= toIndex) next = i - 1;
+      else if (toIndex <= i && i < fromIndex) next = i + 1;
+      this._selectedBlock = { category, index: next };
+    }
+  }
+
+  _editionMoveBlock(category, fromIndex, toIndex) {
+    if (fromIndex === toIndex) return;
+    this._editionMutateList(category, (list) => {
+      const [moved] = list.splice(fromIndex, 1);
+      list.splice(toIndex, 0, moved);
+    });
+    this._editionOnBlockMoved(category, fromIndex, toIndex);
+    this._render();
+  }
+
   // Menu kebab par bloc (issue #105) : Dupliquer (copie insérée juste après
   // l'original, toujours activée par défaut même si l'original ne l'était
   // pas, alias "<nom> (dupliqué)"), Activer/Désactiver (clé HA `enabled`,
@@ -2430,10 +2464,9 @@ class AutomationPlusPanel extends HTMLElement {
   // statique (automation-blocks-catalog.js — #22). Cliquable pour la
   // sélectionner et l'éditer dans le Panneau Paramètres (issue #101) — le
   // clic est géré par délégation sur .edition-liste-body, voir
-  // _attachListeners(). Poignée de glisser-déposer affichée (fidélité
-  // visuelle au .pen) mais toujours inerte (réordonnancement drag-and-drop
-  // toujours hors périmètre — étape 5 de la feuille de route
-  // ARCHITECTURE.md §9, distincte de la palette #102). Toggle actif/inactif
+  // _attachListeners(). Poignée de glisser-déposer fonctionnelle (issue
+  // #110, réordonnancement au sein d'un même groupe uniquement) — voir
+  // _attachEditionDragHandlers(). Toggle actif/inactif
   // (clé HA `enabled`) + menu kebab Dupliquer/Activer-Désactiver/Supprimer
   // fonctionnels (issue #105).
   // Pastille d'icône colorée par catégorie, comme dans le .pen (Carte
@@ -2443,7 +2476,7 @@ class AutomationPlusPanel extends HTMLElement {
       this._editionBlockMenuOpenFor && this._editionBlockMenuOpenFor.category === category && this._editionBlockMenuOpenFor.index === index;
     return `
       <div class="edition-block-card${selected ? " selected" : ""}${modified ? " modified" : ""}${enabled ? "" : " disabled"}" data-category="${category}" data-index="${index}">
-        ${this._icon(ICON_GRIP_VERTICAL, 14)}
+        <span class="edition-block-handle" data-action="drag-handle" data-category="${category}" data-index="${index}">${this._icon(ICON_GRIP_VERTICAL, 14)}</span>
         <span class="edition-block-icon edition-block-icon-${category}">${this._icon(entry.icon, 16)}</span>
         <div class="edition-block-text">
           <span class="edition-block-title">${escapeHtml(entry.title)}</span>
@@ -3567,9 +3600,26 @@ class AutomationPlusPanel extends HTMLElement {
         .edition-block-card.disabled {
           background: var(--ap-off-surface, #e4e4e4);
         }
-        .edition-block-card > svg:first-child {
+        .edition-block-handle {
+          display: flex;
+          align-items: center;
           flex-shrink: 0;
           color: var(--secondary-text-color, #666);
+          cursor: grab;
+          touch-action: none;
+        }
+        .edition-block-handle:active {
+          cursor: grabbing;
+        }
+        /* Glisser-déposer (issue #110) — la carte source suit librement le
+           pointeur via transform (posée en JS pendant le geste, voir
+           _attachListeners()), élevée au-dessus des autres pour rester
+           lisible pendant qu'elles se décalent en dessous/au-dessus d'elle. */
+        .edition-block-card.dragging {
+          position: relative;
+          z-index: 5;
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+          cursor: grabbing;
         }
         .edition-block-icon {
           display: flex;
@@ -5056,6 +5106,20 @@ class AutomationPlusPanel extends HTMLElement {
     const editionListeBody = root.querySelector(".edition-liste-body");
     if (editionListeBody) {
       editionListeBody.addEventListener("click", (event) => {
+        // Glisser-déposer (issue #110) : un pointerup qui a dépassé le seuil
+        // d'activation du drag peut être suivi d'un "click" fantôme du
+        // navigateur (recalculé sur le DOM reconstruit par le _render() du
+        // déplacement) — ce drapeau, posé juste avant ce _render(), absorbe
+        // ce click une seule fois quel que soit l'élément qu'il cible.
+        if (this._editionSuppressNextClick) {
+          this._editionSuppressNextClick = false;
+          return;
+        }
+        // Poignée de glisser-déposer (issue #110) — zone morte pour le clic,
+        // gérée uniquement via pointerdown/pointermove/pointerup ci-dessous ;
+        // ne doit jamais (dé)sélectionner la carte.
+        if (event.target.closest(".edition-block-handle")) return;
+
         const toggle = event.target.closest(".edition-field-toggle");
         if (toggle) {
           const key = toggle.dataset.fieldKey;
@@ -5211,6 +5275,127 @@ class AutomationPlusPanel extends HTMLElement {
         if (tabs) tabs.classList.toggle("disabled", searching);
         const sections = editionListeBody.querySelector(".edition-palette-sections");
         if (sections) sections.innerHTML = this._renderEditionPaletteSections();
+      });
+
+      // Glisser-déposer d'une carte (issue #110) — pointer events plutôt que
+      // le Drag & Drop HTML5 natif, incompatible avec le pattern de
+      // re-render complet du panel (un dragstart/dragover natif perd son
+      // état dès que le DOM sous-jacent est reconstruit). Écouteurs
+      // move/up posés sur window (pas de setPointerCapture nécessaire : les
+      // écouteurs globaux suivent déjà le pointeur même hors de la poignée)
+      // — retirés à chaque relâchement. Réordonnancement strictement borné au
+      // groupe source (.edition-group-cards), jamais entre catégories : le
+      // survol ne considère que les cartes du même conteneur que la carte
+      // saisie. Seuil de 4px avant d'activer le drag (un simple clic net sur
+      // la poignée ne doit rien déclencher, voir garde .edition-block-handle
+      // du listener "click" ci-dessus).
+      editionListeBody.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const handle = event.target.closest(".edition-block-handle");
+        if (!handle) return;
+        const card = handle.closest(".edition-block-card");
+        const container = card && card.parentElement;
+        if (!card || !container) return;
+        // Empêche la sélection de texte native pendant le glisser (le
+        // pointeur traverse le titre/résumé des cartes voisines) — sans ça,
+        // Chromium démarre parfois un geste de sélection de texte au lieu
+        // d'un clic, ce qui supprime le "click" de fin de geste que la garde
+        // ._editionSuppressNextClick attend pour se réinitialiser (constaté
+        // via Playwright : le drapeau restait bloqué à `true` et avalait le
+        // clic suivant, légitime).
+        event.preventDefault();
+
+        const category = handle.dataset.category;
+        const originIndex = Number(handle.dataset.index);
+        const items = Array.from(container.children).filter((el) => el.classList.contains("edition-block-card"));
+        const rects = items.map((el) => el.getBoundingClientRect());
+        // Pas de translation possible s'il n'y a qu'un seul bloc dans le
+        // groupe — rien à réordonner.
+        if (items.length < 2) return;
+        const step = (rects[items.length - 1].top - rects[0].top) / (items.length - 1);
+        const startY = event.clientY;
+        let dragging = false;
+        let currentIndex = originIndex;
+
+        const onMove = (moveEvent) => {
+          const deltaY = moveEvent.clientY - startY;
+          if (!dragging) {
+            if (Math.abs(deltaY) < 4) return;
+            dragging = true;
+            this._editionBlockMenuOpenFor = null;
+            card.classList.add("dragging");
+            card.style.transition = "none";
+          }
+          card.style.transform = `translateY(${deltaY}px)`;
+
+          let nextIndex = 0;
+          let bestDist = Infinity;
+          rects.forEach((rect, i) => {
+            const dist = Math.abs(moveEvent.clientY - (rect.top + rect.height / 2));
+            if (dist < bestDist) {
+              bestDist = dist;
+              nextIndex = i;
+            }
+          });
+          if (nextIndex !== currentIndex) {
+            currentIndex = nextIndex;
+            items.forEach((el, i) => {
+              if (i === originIndex) return;
+              let shift = 0;
+              if (currentIndex <= i && i < originIndex) shift = step;
+              else if (originIndex < i && i <= currentIndex) shift = -step;
+              el.style.transition = "transform 120ms ease";
+              el.style.transform = shift ? `translateY(${shift}px)` : "";
+            });
+          }
+        };
+
+        const cleanup = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onCancel);
+        };
+
+        // `commit` distingue pointerup (valide le déplacement en cours) de
+        // pointercancel (revue #110, review) : un cancel — geste tactile
+        // interrompu par le système, changement d'onglet — doit annuler le
+        // déplacement, pas le valider à la position survolée au moment de
+        // l'interruption.
+        const finishDrag = (commit) => {
+          cleanup();
+          if (!dragging) return;
+          // Posé avant le _render() de _editionMoveBlock (jamais après) : le
+          // "click" fantôme du navigateur, dispatché sur le DOM reconstruit,
+          // doit trouver ce drapeau déjà à `true` (voir garde ci-dessus).
+          // Filet de sécurité : si aucun "click" ne suit finalement ce
+          // relâchement (ex. le navigateur l'a supprimé de lui-même), un
+          // clic normal ultérieur ne doit pas rester bloqué indéfiniment —
+          // un "click" fantôme, lui, est toujours dispatché de façon
+          // synchrone juste après le mouseup, donc avant ce setTimeout(0).
+          this._editionSuppressNextClick = true;
+          setTimeout(() => {
+            this._editionSuppressNextClick = false;
+          }, 0);
+          if (commit && currentIndex !== originIndex) {
+            this._editionMoveBlock(category, originIndex, currentIndex);
+          } else {
+            card.classList.remove("dragging");
+            card.style.transition = "";
+            card.style.transform = "";
+            items.forEach((el) => {
+              if (el === card) return;
+              el.style.transition = "";
+              el.style.transform = "";
+            });
+          }
+        };
+
+        const onUp = () => finishDrag(true);
+        const onCancel = () => finishDrag(false);
+
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onCancel);
       });
     }
   }

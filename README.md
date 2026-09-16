@@ -66,10 +66,11 @@ au rechargement.
 - Ajouter un bloc depuis la Palette (recherche incluse, un onglet par
   catégorie Déclencheurs/Conditions/Actions)
 - Dupliquer, activer/désactiver ou supprimer un bloc (menu kebab de la carte)
+- Réordonner les blocs par glisser-déposer (au sein d'un même groupe
+  déclencheurs/conditions/actions uniquement)
 - Annuler pour tout recharger depuis Home Assistant
 
 **Non éditable**
-- Réordonner les blocs (glisser-déposer)
 - Enregistrer (écriture réelle vers Home Assistant)
 - Annuler/Refaire pas à pas (undo/redo)
 
