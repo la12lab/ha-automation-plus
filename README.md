@@ -68,11 +68,11 @@ au rechargement.
 - Dupliquer, activer/désactiver ou supprimer un bloc (menu kebab de la carte)
 - Réordonner les blocs par glisser-déposer (au sein d'un même groupe
   déclencheurs/conditions/actions uniquement)
+- Annuler/Refaire pas à pas (undo/redo, jusqu'à 50 étapes)
 - Annuler pour tout recharger depuis Home Assistant
 
 **Non éditable**
 - Enregistrer (écriture réelle vers Home Assistant)
-- Annuler/Refaire pas à pas (undo/redo)
 
 ## Roadmap
 

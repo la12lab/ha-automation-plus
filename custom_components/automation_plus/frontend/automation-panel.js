@@ -25,12 +25,18 @@ import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, WEEKDAY_ORDER, WEEKDAY_LABELS, 
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.6";
-const DEBUG_BUILD_DATE = "2026-09-16";
+const DEBUG_VERSION = "0.8.0-beta.7";
+const DEBUG_BUILD_DATE = "2026-09-17";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
 const ISSUES_URL = `${REPO_URL}/issues`;
 const RELEASES_URL = `${REPO_URL}/releases`;
+
+// Profondeur de la pile Undo/Redo de la vue Liste (issue #90, lot 1). Un
+// snapshot est un clone JSON de la config en cours d'édition (quelques Ko) —
+// 50 entrées restent négligeables en mémoire pour un coût déjà accepté à
+// chaque mutation (_editionMutateList clone déjà la liste concernée).
+const EDITION_HISTORY_LIMIT = 50;
 
 const GROUP_OPTIONS = [
   { id: "none", label: "Ne pas regrouper" },
@@ -376,8 +382,9 @@ class AutomationPlusPanel extends HTMLElement {
     // Page Édition, mode Code (lecture seule — issue #87) : automatisation
     // ciblée (objet enrichi, voir _getAutomations()) et état du YAML
     // chargé/sérialisé côté client. Rechargé à chaque ouverture, jamais mis
-    // en cache d'une automatisation à l'autre. Liste/Graphe/Déverrouiller
-    // hors périmètre de ce lot (issues #88/#89/#90).
+    // en cache d'une automatisation à l'autre. Graphe/Déverrouiller/
+    // Enregistrer restent hors périmètre (issues #86/#88/#89). Undo/Redo de
+    // la vue Liste : voir issue #90.
     this._editionAutomation = null;
     this._editionYaml = { loading: false, lines: null, config: null, error: null };
     this._editionHelpOpen = false;
@@ -403,6 +410,14 @@ class AutomationPlusPanel extends HTMLElement {
     this._selectedBlock = null;
     this._editionOriginalConfig = null;
     this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
+    // Historique Undo/Redo de la vue Liste (issue #90, lot 1) : pile de
+    // snapshots {config, originMap, selectedBlock} alimentée en tête de
+    // _editionMutateList (point d'interception unique de toutes les
+    // mutations de blocs). _editionHistoryMuted évite qu'une restauration
+    // (_editionRestoreSnapshot) ne s'auto-empile si elle repasse par
+    // _editionMutateList. Limite de profondeur : EDITION_HISTORY_LIMIT.
+    this._editionHistory = { past: [], future: [] };
+    this._editionHistoryMuted = false;
     // Menu kebab par bloc (Dupliquer/Activer-Désactiver/Supprimer, issue
     // #105) — un seul ouvert à la fois, même pattern que
     // _optionsMenuOpenFor (menu Options automatisation du Dashboard).
@@ -1283,6 +1298,7 @@ class AutomationPlusPanel extends HTMLElement {
     this._selectedBlock = null;
     this._editionOriginalConfig = null;
     this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
+    this._editionHistory = { past: [], future: [] };
     this._editionBlockMenuOpenFor = null;
     this._editionPaletteQuery = "";
     this._editionPaletteActiveCategory = "trigger";
@@ -1292,6 +1308,12 @@ class AutomationPlusPanel extends HTMLElement {
 
   async _loadEditionYaml() {
     if (!this._hass || !this._editionAutomation) return;
+    // Point de reset unique de l'historique Undo/Redo (issue #90, lot 1) :
+    // couvre l'ouverture d'une automatisation (_openEdition) ET le discard
+    // total (_editionDiscardChanges), qui passent tous deux par ici. Posé
+    // avant la sortie anticipée mode dossier pour ne jamais laisser une
+    // pile orpheline d'une automatisation précédente.
+    this._editionHistory = { past: [], future: [] };
     // Mode dossier dédié : l'API native HA est câblée en dur sur
     // automations.yaml, inutilisable ici (voir ARCHITECTURE.md §8) — route
     // backend dédiée pas encore construite (#92). Erreur explicite plutôt
@@ -1408,12 +1430,88 @@ class AutomationPlusPanel extends HTMLElement {
     const state = this._editionYaml;
     if (!state || !state.config) return;
     const [singular, plural] = EDITION_LIST_KEYS[category];
-    const list = JSON.parse(JSON.stringify(pickList(state.config, singular, plural)));
+    const beforeList = pickList(state.config, singular, plural);
+    const list = JSON.parse(JSON.stringify(beforeList));
     mutator(list);
+    // Historique Undo/Redo (issue #90, lot 1) : snapshot pris ici, avant
+    // réécriture de state.config plus bas — donc de l'état "avant
+    // l'opération complète", correct pour un undo. Garde anti-no-op :
+    // comparaison de la sérialisation JSON déjà calculée, n'empile que si
+    // la mutation a réellement changé quelque chose (évite un undo fantôme
+    // pour un mutator appelé sans effet, ex. bloc introuvable). Muet
+    // pendant une restauration (_editionRestoreSnapshot) pour ne jamais
+    // s'auto-empiler si elle repasse par ce point.
+    if (!this._editionHistoryMuted && JSON.stringify(beforeList) !== JSON.stringify(list)) {
+      this._editionPushHistory();
+    }
     const config = { ...state.config, [plural]: list };
     delete config[singular];
     state.config = config;
     state.lines = this._stringifyYaml(config);
+  }
+
+  // Snapshot complet de l'état annulable de la vue Liste (issue #90, lot 1) :
+  // config + _editionBlockOriginMap (indexé par position, doit rester
+  // synchrone avec config sous peine de rouvrir le piège position-only déjà
+  // corrigé sur _editionDirty) + selectedBlock (contexte de sélection perçu
+  // par l'utilisateur). state.lines est dérivé, jamais snapshoté.
+  _editionSnapshot() {
+    return {
+      config: JSON.parse(JSON.stringify(this._editionYaml.config)),
+      originMap: JSON.parse(JSON.stringify(this._editionBlockOriginMap)),
+      selectedBlock: this._selectedBlock ? { ...this._selectedBlock } : null,
+    };
+  }
+
+  _editionPushHistory() {
+    this._editionHistory.past.push(this._editionSnapshot());
+    if (this._editionHistory.past.length > EDITION_HISTORY_LIMIT) {
+      this._editionHistory.past.shift();
+    }
+    // Toute nouvelle mutation invalide la branche "refaire" en cours.
+    this._editionHistory.future = [];
+  }
+
+  // Réécrit directement _editionBlockOriginMap/_selectedBlock (jamais via
+  // les fonctions de réalignement _editionOnBlock*, qui supposent une
+  // mutation incrémentale — ici on restaure un état déjà cohérent tel quel).
+  _editionRestoreSnapshot(snapshot) {
+    const state = this._editionYaml;
+    state.config = JSON.parse(JSON.stringify(snapshot.config));
+    state.lines = this._stringifyYaml(state.config);
+    this._editionBlockOriginMap = JSON.parse(JSON.stringify(snapshot.originMap));
+    this._selectedBlock = snapshot.selectedBlock ? { ...snapshot.selectedBlock } : null;
+    // Un menu kebab resté ouvert sur un index qui vient de changer de sens
+    // serait un piège (issue #105) — toujours refermé après restauration.
+    this._editionBlockMenuOpenFor = null;
+  }
+
+  _editionUndo() {
+    if (!this._editionHistory.past.length) return;
+    this._editionHistoryMuted = true;
+    try {
+      const current = this._editionSnapshot();
+      const previous = this._editionHistory.past.pop();
+      this._editionHistory.future.push(current);
+      this._editionRestoreSnapshot(previous);
+    } finally {
+      this._editionHistoryMuted = false;
+    }
+    this._render();
+  }
+
+  _editionRedo() {
+    if (!this._editionHistory.future.length) return;
+    this._editionHistoryMuted = true;
+    try {
+      const current = this._editionSnapshot();
+      const next = this._editionHistory.future.pop();
+      this._editionHistory.past.push(current);
+      this._editionRestoreSnapshot(next);
+    } finally {
+      this._editionHistoryMuted = false;
+    }
+    this._render();
   }
 
   _editionSetBlockField(key, fieldType, rawValue) {
@@ -1602,8 +1700,10 @@ class AutomationPlusPanel extends HTMLElement {
   // Bouton "Annuler" du header, vue Liste (issue #101, suite à retour
   // utilisateur) : abandonne TOUTES les modifications en mémoire d'un coup
   // en rechargeant l'automatisation depuis HA — aucune écriture réseau,
-  // reste dans le périmètre mémoire déjà validé. Un historique pas à pas
-  // (Undo/Redo réel) reste une fonctionnalité séparée, voir issue #90.
+  // reste dans le périmètre mémoire déjà validé. Discard total distinct de
+  // Undo/Redo (historique pas à pas, issue #90) : _loadEditionYaml() vide
+  // aussi la pile undo/redo, un ancien état intermédiaire abandonné ne doit
+  // pas redevenir accessible après un "Annuler".
   _editionDiscardChanges() {
     if (!this._editionDirty) return;
     this._selectedBlock = null;
@@ -2310,12 +2410,14 @@ class AutomationPlusPanel extends HTMLElement {
     // "Déverrouiller" est spécifique au flux Code (#87/#88, verrou avant
     // édition brute) — masqué en vue Liste, où l'édition de champs est
     // directement possible sans déverrouillage (issue #101). Undo/Redo
-    // restent visibles-mais-désactivés dans les 2 vues : un vrai historique
-    // pas à pas reste une fonctionnalité à part entière (issue #90), pas
-    // traitée dans ce lot — seule "Annuler" (tout annuler d'un coup, en
-    // rechargeant depuis HA) est activée ci-dessous pour la vue Liste.
+    // (issue #90, lot 1) : mécanisme accroché à _editionMutateList, donc
+    // vue-agnostique en soi, mais activé seulement en vue Liste pour
+    // l'instant — Code reste intégralement lecture seule (#87) et Graphe
+    // n'existe pas encore (#86), aucune des deux n'alimente donc la pile.
     const showLock = this._editionSubView === "code";
     const cancelEnabled = this._editionSubView === "liste" && this._editionDirty;
+    const undoEnabled = this._editionSubView === "liste" && this._editionHistory.past.length > 0;
+    const redoEnabled = this._editionSubView === "liste" && this._editionHistory.future.length > 0;
     return `
       <div class="header edition-toolbar">
         <div class="header-left">
@@ -2349,10 +2451,20 @@ class AutomationPlusPanel extends HTMLElement {
           `
               : ""
           }
-          <button class="icon-button" title="Pas encore disponible" disabled>
+          <button
+            class="icon-button"
+            data-action="undo-edition"
+            title="${undoEnabled ? "Annuler la dernière modification" : "Rien à annuler"}"
+            ${undoEnabled ? "" : "disabled"}
+          >
             ${this._icon(ICON_UNDO_2, 20)}
           </button>
-          <button class="icon-button" title="Pas encore disponible" disabled>
+          <button
+            class="icon-button"
+            data-action="redo-edition"
+            title="${redoEnabled ? "Rétablir la modification annulée" : "Rien à rétablir"}"
+            ${redoEnabled ? "" : "disabled"}
+          >
             ${this._icon(ICON_REDO_2, 20)}
           </button>
           <button
@@ -5027,6 +5139,20 @@ class AutomationPlusPanel extends HTMLElement {
     if (discardEditionBtn) {
       discardEditionBtn.addEventListener("click", () => {
         this._editionDiscardChanges();
+      });
+    }
+
+    const undoEditionBtn = root.querySelector('[data-action="undo-edition"]');
+    if (undoEditionBtn) {
+      undoEditionBtn.addEventListener("click", () => {
+        this._editionUndo();
+      });
+    }
+
+    const redoEditionBtn = root.querySelector('[data-action="redo-edition"]');
+    if (redoEditionBtn) {
+      redoEditionBtn.addEventListener("click", () => {
+        this._editionRedo();
       });
     }
 
