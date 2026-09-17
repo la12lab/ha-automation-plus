@@ -54,6 +54,8 @@ Le panel apparaît dans la sidebar.
 
 ## Page Édition
 
+### Vue Liste
+
 État actuel de la vue Liste (édition par blocs) — **rien n'est encore
 enregistré sur disque**, toute modification reste en mémoire et est perdue
 au rechargement.
@@ -73,6 +75,18 @@ au rechargement.
 
 **Non éditable**
 - Enregistrer (écriture réelle vers Home Assistant)
+
+### Vue Code
+
+Lecture seule du YAML brut de l'automatisation, avec navigation :
+- Sidebar de raccourcis pour sauter directement à la section
+  Déclencheur/Condition/Action (désactivés si la section est absente),
+  avec scroll automatique et surlignage du bloc correspondant
+- Recherche live (insensible à la casse) dans le YAML affiché, avec
+  surlignage des correspondances et scroll vers la première trouvée
+
+**Non éditable**
+- Modifier ou enregistrer le YAML depuis cette vue
 
 ## Roadmap
 

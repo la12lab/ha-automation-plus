@@ -25,7 +25,7 @@ import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, WEEKDAY_ORDER, WEEKDAY_LABELS, 
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.7";
+const DEBUG_VERSION = "0.8.0-beta.8";
 const DEBUG_BUILD_DATE = "2026-09-17";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
@@ -263,6 +263,15 @@ const EDITION_PALETTE_TABS = [
   { category: "action", icon: ICON_PLAY, label: "Actions", sectionTitle: "ACTIONS" },
 ];
 
+// Boutons "Aller à" de la Sidebar de la vue Code (issue #112) — même icônes
+// que la Palette de la vue Liste, labels au singulier (cohérent avec
+// EDITION_CATEGORY_LABELS et le design validé dans le .pen).
+const EDITION_CODE_GOTO_ITEMS = [
+  { category: "trigger", icon: ICON_ZAP },
+  { category: "condition", icon: ICON_GIT_BRANCH },
+  { category: "action", icon: ICON_PLAY },
+];
+
 // Valide `label.color` (issu du label_registry HA) avant interpolation dans
 // un attribut `style` — escapeHtml() bloque la sortie de l'attribut mais pas
 // une valeur CSS malformée (ex. "red;background:...") qui casserait le rendu
@@ -418,6 +427,16 @@ class AutomationPlusPanel extends HTMLElement {
     // _editionMutateList. Limite de profondeur : EDITION_HISTORY_LIMIT.
     this._editionHistory = { past: [], future: [] };
     this._editionHistoryMuted = false;
+    // Sidebar "Aller à" de la vue Code (issue #112, ajustement post-review) :
+    // sélection PERSISTANTE (retour utilisateur explicite — pas un état
+    // transitoire) — reclique sur le même bouton pour désélectionner, un
+    // seul actif à la fois (cliquer un autre bouton bascule directement).
+    // Dérivé dans _renderEditionCode()/_renderEditionCodeSidebar() à chaque
+    // render, jamais de manipulation DOM directe hors render. Recherche
+    // YAML (même issue) : champ de la sidebar déjà présent dans le .pen
+    // (résidu "Palette" en apparence, en réalité prévu pour cette vue).
+    this._editionCodeActiveCategory = null;
+    this._editionCodeSearchQuery = "";
     // Menu kebab par bloc (Dupliquer/Activer-Désactiver/Supprimer, issue
     // #105) — un seul ouvert à la fois, même pattern que
     // _optionsMenuOpenFor (menu Options automatisation du Dashboard).
@@ -1092,6 +1111,90 @@ class AutomationPlusPanel extends HTMLElement {
     return lines;
   }
 
+  // Sidebar "Aller à" de la vue Code (issue #112) : localise la ligne
+  // top-level trigger(s)/condition(s)/action(s) dans state.lines (généré par
+  // _stringifyYaml ci-dessus — une clé top-level apparaît sans indentation,
+  // ex. "trigger:") et la fin de son bloc (première ligne suivante non
+  // indentée), pour surligner tout le bloc au clic, pas juste l'en-tête.
+  // Réutilise EDITION_LIST_KEYS pour couvrir singulier ET pluriel. Retourne
+  // null si la section est absente du YAML (alimente l'état désactivé du
+  // bouton correspondant, voir _renderEditionCodeSidebar).
+  _findEditionCodeLineRange(category) {
+    const state = this._editionYaml;
+    if (!state || !state.lines) return null;
+    const [singular, plural] = EDITION_LIST_KEYS[category];
+    const start = state.lines.findIndex(
+      (line) => line === `${singular}:` || line === `${plural}:`
+    );
+    if (start === -1) return null;
+    let end = state.lines.length - 1;
+    for (let i = start + 1; i < state.lines.length; i++) {
+      if (/^\S/.test(state.lines[i])) {
+        end = i - 1;
+        break;
+      }
+    }
+    return { start, end };
+  }
+
+  // Ensemble des index de ligne correspondant à la recherche en cours dans
+  // la sidebar de la vue Code (issue #112) — comparaison insensible à la
+  // casse, sous-chaîne simple (pas de regex). Retourne null hors recherche
+  // (champ vide), pour distinguer "aucune recherche" de "recherche sans
+  // résultat" dans les deux consommateurs (_renderEditionCodeLines,
+  // _scrollEditionCodeToFirstMatch).
+  _editionCodeSearchMatches() {
+    const state = this._editionYaml;
+    const query = this._editionCodeSearchQuery.trim().toLowerCase();
+    if (!query || !state.lines) return null;
+    const indices = new Set();
+    state.lines.forEach((line, index) => {
+      if (line.toLowerCase().includes(query)) indices.add(index);
+    });
+    return indices;
+  }
+
+  // Scroll bas niveau vers une ligne précise (issue #112) — ancré sur
+  // .edition-scroll-area (jamais .edition-code seul) : c'est cette zone qui
+  // scroll, gouttière et code doivent défiler ensemble (cf. commentaire de
+  // _renderEditionCode). Le surlignage lui-même n'est plus géré ici : il est
+  // dérivé de l'état (_editionCodeActiveCategory/_editionCodeSearchQuery) à
+  // chaque appel de _renderEditionCodeLines()/_renderEditionCodeGutter(),
+  // jamais posé/retiré via classList en dehors du render.
+  _scrollEditionCodeToLine(index) {
+    const root = this.shadowRoot;
+    if (index == null || index < 0 || !root) return;
+    const scrollArea = root.querySelector(".edition-scroll-area");
+    const allLines = root.querySelectorAll(".edition-code .edition-line-text");
+    const target = allLines[index];
+    if (!scrollArea || !target) return;
+    const areaRect = scrollArea.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    scrollArea.scrollTo({
+      top: scrollArea.scrollTop + (targetRect.top - areaRect.top) - 20,
+      behavior: "smooth",
+    });
+  }
+
+  // Scroll vers le début du bloc actif de la sidebar "Aller à" — appelé
+  // juste après un _render() (donc une fois le nouveau DOM en place) suite
+  // au clic sur un bouton de catégorie.
+  _scrollEditionCodeToActiveCategory() {
+    const category = this._editionCodeActiveCategory;
+    const range = category ? this._findEditionCodeLineRange(category) : null;
+    if (range) this._scrollEditionCodeToLine(range.start);
+  }
+
+  // Scroll vers la première ligne correspondant à la recherche en cours —
+  // appelé à chaque frappe dans le champ recherche de la sidebar Code, sans
+  // passer par _render() (voir listener "input" de _attachListeners, même
+  // contrainte de focus que la recherche de la Palette en vue Liste).
+  _scrollEditionCodeToFirstMatch() {
+    const matches = this._editionCodeSearchMatches();
+    if (!matches || !matches.size) return;
+    this._scrollEditionCodeToLine(Math.min(...matches));
+  }
+
   // Positionne le menu Options (.options-menu, position: fixed) par rapport
   // au bouton kebab cliqué — nécessaire depuis le passage à position: fixed
   // (voir _renderOptionsMenu) qui échappe aux overflow:hidden/auto ancêtres
@@ -1302,18 +1405,23 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionBlockMenuOpenFor = null;
     this._editionPaletteQuery = "";
     this._editionPaletteActiveCategory = "trigger";
+    this._editionCodeActiveCategory = null;
+    this._editionCodeSearchQuery = "";
     this._render();
     this._loadEditionYaml();
   }
 
   async _loadEditionYaml() {
     if (!this._hass || !this._editionAutomation) return;
-    // Point de reset unique de l'historique Undo/Redo (issue #90, lot 1) :
-    // couvre l'ouverture d'une automatisation (_openEdition) ET le discard
-    // total (_editionDiscardChanges), qui passent tous deux par ici. Posé
-    // avant la sortie anticipée mode dossier pour ne jamais laisser une
-    // pile orpheline d'une automatisation précédente.
+    // Point de reset unique de l'historique Undo/Redo (issue #90, lot 1) et
+    // de la sidebar "Aller à"/recherche de la vue Code (issue #112) : couvre
+    // l'ouverture d'une automatisation (_openEdition) ET le discard total
+    // (_editionDiscardChanges), qui passent tous deux par ici. Posé avant la
+    // sortie anticipée mode dossier pour ne jamais laisser un état orphelin
+    // d'une automatisation précédente.
     this._editionHistory = { past: [], future: [] };
+    this._editionCodeActiveCategory = null;
+    this._editionCodeSearchQuery = "";
     // Mode dossier dédié : l'API native HA est câblée en dur sur
     // automations.yaml, inutilisable ici (voir ARCHITECTURE.md §8) — route
     // backend dédiée pas encore construite (#92). Erreur explicite plutôt
@@ -2515,9 +2623,10 @@ class AutomationPlusPanel extends HTMLElement {
     return this._editionSubView === "code" ? this._renderEditionCode() : this._renderEditionListe();
   }
 
-  // Contenu de l'onglet Code (lecture seule — #87) : bandeau + gouttière/
-  // lignes dans une seule zone scrollable commune (gouttière et code doivent
-  // défiler ensemble, pas indépendamment).
+  // Contenu de l'onglet Code (lecture seule — #87) : bandeau + Sidebar "Aller
+  // à"/recherche (issue #112) + gouttière/lignes dans une seule zone
+  // scrollable commune (gouttière et code doivent défiler ensemble, pas
+  // indépendamment).
   _renderEditionCode() {
     const state = this._editionYaml;
     let bodyHtml;
@@ -2526,16 +2635,10 @@ class AutomationPlusPanel extends HTMLElement {
     } else if (state.error) {
       bodyHtml = `<p class="edition-status-text edition-status-error">${escapeHtml(state.error)}</p>`;
     } else if (state.lines) {
-      const gutterHtml = state.lines
-        .map((_, index) => `<span class="edition-line-number">${index + 1}</span>`)
-        .join("");
-      const codeHtml = state.lines
-        .map((line) => `<span class="edition-line-text">${line ? escapeHtml(line) : " "}</span>`)
-        .join("");
       bodyHtml = `
         <div class="edition-editor-card">
-          <div class="edition-gutter">${gutterHtml}</div>
-          <div class="edition-code">${codeHtml}</div>
+          <div class="edition-gutter">${this._renderEditionCodeGutter()}</div>
+          <div class="edition-code">${this._renderEditionCodeLines()}</div>
         </div>
       `;
     } else {
@@ -2543,7 +2646,102 @@ class AutomationPlusPanel extends HTMLElement {
     }
     return `
       ${this._renderEditionReadonlyBanner()}
-      <div class="scroll-area edition-scroll-area">${bodyHtml}</div>
+      <div class="edition-code-body">
+        ${this._renderEditionCodeSidebar()}
+        <div class="scroll-area edition-scroll-area">${bodyHtml}</div>
+      </div>
+    `;
+  }
+
+  // Numéros de ligne (issue #112) : porte le "trait vertical" de la section
+  // active de la sidebar "Aller à" — retour utilisateur explicite : dans la
+  // colonne des numéros, pas au bord du code. Même classes que
+  // _renderEditionCodeLines(), la CSS différencie l'effet par colonne
+  // ancêtre (.edition-gutter vs .edition-code).
+  _renderEditionCodeGutter() {
+    const state = this._editionYaml;
+    const range = this._editionCodeActiveCategory
+      ? this._findEditionCodeLineRange(this._editionCodeActiveCategory)
+      : null;
+    return state.lines
+      .map((_, index) => {
+        const active = range && index >= range.start && index <= range.end;
+        const cls = active
+          ? ` edition-line-highlight edition-line-highlight-${this._editionCodeActiveCategory}`
+          : "";
+        return `<span class="edition-line-number${cls}">${index + 1}</span>`;
+      })
+      .join("");
+  }
+
+  // Lignes de code (issue #112) : combine le surlignage de la section active
+  // (persistant, dérivé de _editionCodeActiveCategory) et celui de la
+  // recherche en cours (_editionCodeSearchQuery) — une ligne peut porter les
+  // deux à la fois. Régénérée à chaque render ET patchée directement (sans
+  // _render()) par le listener "input" de la recherche, voir
+  // _attachListeners().
+  _renderEditionCodeLines() {
+    const state = this._editionYaml;
+    const range = this._editionCodeActiveCategory
+      ? this._findEditionCodeLineRange(this._editionCodeActiveCategory)
+      : null;
+    const matches = this._editionCodeSearchMatches();
+    return state.lines
+      .map((line, index) => {
+        const classes = ["edition-line-text"];
+        if (range && index >= range.start && index <= range.end) {
+          classes.push("edition-line-highlight", `edition-line-highlight-${this._editionCodeActiveCategory}`);
+        }
+        if (matches && matches.has(index)) classes.push("edition-line-search-match");
+        return `<span class="${classes.join(" ")}" data-line-index="${index}">${
+          line ? escapeHtml(line) : " "
+        }</span>`;
+      })
+      .join("");
+  }
+
+  // Sidebar "Aller à" + recherche de la vue Code (issue #112) : le champ
+  // recherche existait déjà dans le .pen (initialement pris pour un résidu
+  // de la Palette de la vue Liste — en réalité prévu pour cette vue).
+  // Sélection persistante des boutons : reclic pour désélectionner, un seul
+  // actif à la fois (retour utilisateur, pas l'état transitoire du plan
+  // d'origine) — un bouton sans section correspondante dans le YAML reste
+  // désactivé plutôt que cliquable sans effet.
+  _renderEditionCodeSidebar() {
+    const itemsHtml = EDITION_CODE_GOTO_ITEMS.map(({ category, icon }) => {
+      const label = EDITION_CATEGORY_LABELS[category];
+      const available = !!this._findEditionCodeLineRange(category);
+      const active = this._editionCodeActiveCategory === category;
+      const title = available
+        ? `Aller à la section ${label}`
+        : `Aucune section ${label} dans cette automatisation`;
+      return `
+        <button
+          class="edition-goto-btn edition-goto-btn-${category}${active ? " edition-goto-btn-active" : ""}"
+          data-action="goto-category"
+          data-category="${category}"
+          title="${escapeHtml(title)}"
+          ${available ? "" : "disabled"}
+        >
+          ${this._icon(icon, 18)}
+          <span>${escapeHtml(label)}</span>
+        </button>
+      `;
+    }).join("");
+    return `
+      <aside class="edition-code-sidebar">
+        <div class="edition-palette-search">
+          ${this._icon(ICON_SEARCH, 15)}
+          <input
+            type="text"
+            class="edition-code-search-input"
+            placeholder="Rechercher dans le YAML…"
+            value="${escapeHtml(this._editionCodeSearchQuery)}"
+          />
+        </div>
+        <div class="edition-code-sidebar-title">Aller à</div>
+        ${itemsHtml}
+      </aside>
     `;
   }
 
@@ -3054,6 +3252,11 @@ class AutomationPlusPanel extends HTMLElement {
           --ap-category-condition-fg: #1565c0;
           --ap-category-action-bg: #e8f5e9;
           --ap-category-action-fg: #2e7d32;
+          /* Surlignage des correspondances de recherche dans la vue Code
+             (issue #112) — jaune neutre, volontairement distinct des 3
+             couleurs de catégorie ci-dessus pour ne créer aucune ambiguïté
+             avec le surlignage de bloc de la sidebar "Aller à". */
+          --ap-search-match-bg: #fff9c4;
         }
         :host(.ap-dark) {
           --ap-surface: color-mix(in srgb, var(--primary-background-color, #111111) 50%, black 50%);
@@ -3065,6 +3268,7 @@ class AutomationPlusPanel extends HTMLElement {
           --ap-category-condition-fg: #64b5f6;
           --ap-category-action-bg: #1b4d1e;
           --ap-category-action-fg: #81c784;
+          --ap-search-match-bg: #5c4a00;
         }
         .header {
           display: flex;
@@ -3221,6 +3425,8 @@ class AutomationPlusPanel extends HTMLElement {
         }
         .edition-scroll-area {
           padding: 20px;
+          flex: 1;
+          min-width: 0;
         }
         .edition-status-text {
           margin: 0;
@@ -3244,7 +3450,14 @@ class AutomationPlusPanel extends HTMLElement {
           display: flex;
           flex-direction: column;
           flex-shrink: 0;
-          padding: 16px 10px;
+          /* Padding gauche retiré du conteneur et reporté sur
+             .edition-line-number (issue #112) : le trait vertical (border-
+             left) doit s'appuyer sur le vrai bord gauche de la gouttière,
+             pas apparaître en retrait à l'intérieur du padding — sinon un
+             espace neutre reste visible avant le trait (retour utilisateur,
+             comparaison directe avec la carte "modifié" du .pen où le trait
+             est flush contre le bord). */
+          padding: 16px 10px 16px 0;
           background: var(--secondary-background-color, #f1f3f4);
           border-right: 1px solid var(--divider-color, #e0e0e0);
           text-align: right;
@@ -3254,6 +3467,19 @@ class AutomationPlusPanel extends HTMLElement {
           font-size: 13px;
           line-height: 1.6;
           color: var(--secondary-text-color, #666);
+          padding-left: 10px;
+          /* Trait vertical de la section active de la sidebar "Aller à"
+             (issue #112, retour utilisateur) — à GAUCHE des numéros, flush
+             contre le bord gauche de la gouttière (voir padding-left ci-
+             dessus, reporté du conteneur vers ce span pour que le border-left
+             s'appuie sur le vrai bord, pas sur un padding interne). Bordure
+             transparente en permanence pour éviter un décalage horizontal à
+             l'activation ; .edition-line-number est un
+             flex-item étiré (stretch par défaut) sur toute la largeur de la
+             gouttière malgré text-align:right, donc ce border-left reste
+             fixe à gauche quel que soit le nombre de chiffres du numéro. */
+          border-left: 3px solid transparent;
+          transition: color 0.2s ease, border-color 0.2s ease;
         }
         .edition-code {
           display: flex;
@@ -3269,6 +3495,106 @@ class AutomationPlusPanel extends HTMLElement {
           line-height: 1.6;
           color: var(--primary-text-color, #212121);
           white-space: pre;
+          transition: color 0.2s ease, background-color 0.2s ease;
+        }
+        /* Section active de la sidebar "Aller à" (issue #112) : sélection
+           PERSISTANTE (retour utilisateur explicite, pas l'état transitoire
+           du plan d'origine) — fond teinté UNIQUEMENT sur la colonne du code
+           (retour utilisateur), la gouttière ne porte que le trait vertical
+           de 3px, flush à son bord gauche, sans fond. */
+        .edition-gutter .edition-line-highlight.edition-line-highlight-trigger {
+          border-left-color: var(--ap-category-trigger-fg);
+        }
+        .edition-gutter .edition-line-highlight.edition-line-highlight-condition {
+          border-left-color: var(--ap-category-condition-fg);
+        }
+        .edition-gutter .edition-line-highlight.edition-line-highlight-action {
+          border-left-color: var(--ap-category-action-fg);
+        }
+        .edition-code .edition-line-highlight.edition-line-highlight-trigger {
+          background: var(--ap-category-trigger-bg);
+        }
+        .edition-code .edition-line-highlight.edition-line-highlight-condition {
+          background: var(--ap-category-condition-bg);
+        }
+        .edition-code .edition-line-highlight.edition-line-highlight-action {
+          background: var(--ap-category-action-bg);
+        }
+        /* Correspondances de la recherche YAML (issue #112) — indépendant du
+           surlignage de catégorie ci-dessus, une ligne peut cumuler les deux
+           (voir _renderEditionCodeLines). Spécificité de sélecteur portée à
+           3 classes (comme les règles de catégorie ci-dessus, même propriété
+           background) pour rester visible même sur une ligne déjà en fond
+           catégorie — sans ça le fond catégorie l'emporte systématiquement
+           et masque le surlignage recherche, piège relevé en review. */
+        .edition-code .edition-line-text.edition-line-search-match {
+          background: var(--ap-search-match-bg);
+        }
+        /* Vue Code (#87) — Sidebar "Aller à" + recherche (issue #112) : mêmes
+           largeur/padding que .edition-palette de la vue Liste (cohérence
+           visuelle entre les 2 onglets). Dimensions et couleurs fidèles au
+           .pen (frame U3del2, sidebar VIKlQ). */
+        .edition-code-body {
+          display: flex;
+          flex: 1;
+          min-height: 0;
+        }
+        .edition-code-sidebar {
+          flex-shrink: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          width: 300px;
+          padding: 16px;
+          background: var(--ap-surface, var(--card-background-color, #fff));
+          border-right: 1px solid var(--divider-color, #e0e0e0);
+          overflow-y: auto;
+        }
+        .edition-code-sidebar-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--secondary-text-color, #666);
+          padding: 4px 2px 4px;
+        }
+        .edition-goto-btn {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          height: 44px;
+          padding: 0 16px;
+          border: 1px solid var(--divider-color, #e0e0e0);
+          border-radius: 10px;
+          background: var(--ap-btn-bg, #fff);
+          color: var(--secondary-text-color, #666);
+          font-size: 14px;
+          cursor: pointer;
+          transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }
+        .edition-goto-btn:hover:not(:disabled) {
+          background: var(--secondary-background-color, #f1f3f4);
+          color: var(--primary-text-color, #212121);
+        }
+        .edition-goto-btn:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
+        /* État actif PERSISTANT (issue #112, retour utilisateur) — reste
+           coloré tant que l'utilisateur n'a pas rediqué dessus, contrairement
+           à un état "pressé" transitoire. */
+        .edition-goto-btn-trigger.edition-goto-btn-active {
+          background: var(--ap-category-trigger-bg);
+          border-color: var(--ap-category-trigger-fg);
+          color: var(--ap-category-trigger-fg);
+        }
+        .edition-goto-btn-condition.edition-goto-btn-active {
+          background: var(--ap-category-condition-bg);
+          border-color: var(--ap-category-condition-fg);
+          color: var(--ap-category-condition-fg);
+        }
+        .edition-goto-btn-action.edition-goto-btn-active {
+          background: var(--ap-category-action-bg);
+          border-color: var(--ap-category-action-fg);
+          color: var(--ap-category-action-fg);
         }
         /* Vue Liste (#5) — Sidebar Palette, Zone Centrale et Panneau
            Paramètres tous fonctionnels en mémoire (#101/#102), fidèles aux
@@ -5522,6 +5848,46 @@ class AutomationPlusPanel extends HTMLElement {
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
         window.addEventListener("pointercancel", onCancel);
+      });
+    }
+
+    // Sidebar "Aller à" de la vue Code (issue #112) : délégation sur le
+    // conteneur, même pattern que .edition-liste-body ci-dessus. Aucune
+    // mutation d'état ici (pure navigation UI) — pas de _render() déclenché,
+    // donc pas besoin de réattacher ce listener à chaque clic.
+    const editionCodeBody = root.querySelector(".edition-code-body");
+    if (editionCodeBody) {
+      // Boutons "Aller à" (issue #112, ajustement post-review) : sélection
+      // PERSISTANTE — reclic sur le même bouton désélectionne, cliquer un
+      // autre bouton bascule directement dessus (jamais 2 actifs ensemble).
+      // _render() reconstruit tout .edition-code-body (bouton actif + trait
+      // vertical dérivés de l'état par _renderEditionCode*, voir plus haut),
+      // puis le scroll est posé une fois le nouveau DOM en place.
+      editionCodeBody.addEventListener("click", (event) => {
+        const btn = event.target.closest('.edition-goto-btn[data-action="goto-category"]');
+        if (!btn || btn.disabled) return;
+        const category = btn.dataset.category;
+        this._editionCodeActiveCategory = this._editionCodeActiveCategory === category ? null : category;
+        this._render();
+        this._scrollEditionCodeToActiveCategory();
+      });
+
+      // Recherche YAML de la sidebar Code (issue #112) : "input" pour un
+      // filtrage/scroll live, mais SANS passer par _render() — même
+      // contrainte que la recherche de la Palette en vue Liste (voir plus
+      // bas) : reconstruire tout .edition-code-body casserait le focus/
+      // curseur de ce champ en cours de frappe. Patch DOM ciblé sur
+      // .edition-gutter/.edition-code uniquement, le champ recherche
+      // lui-même n'est jamais touché.
+      editionCodeBody.addEventListener("input", (event) => {
+        const searchInput = event.target.closest(".edition-code-search-input");
+        if (!searchInput) return;
+        this._editionCodeSearchQuery = searchInput.value;
+        const gutterEl = editionCodeBody.querySelector(".edition-gutter");
+        if (gutterEl) gutterEl.innerHTML = this._renderEditionCodeGutter();
+        const codeEl = editionCodeBody.querySelector(".edition-code");
+        if (codeEl) codeEl.innerHTML = this._renderEditionCodeLines();
+        this._scrollEditionCodeToFirstMatch();
       });
     }
   }
