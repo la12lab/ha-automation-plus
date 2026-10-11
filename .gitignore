@@ -15,7 +15,7 @@ CLAUDE.md
 *.pen
 
 # Suivi UI/design interne (privé, non distribué)
-pen-ui-integration/
+design/
 
 # Outil de preview local du panel (privé, non distribué)
 dev/
