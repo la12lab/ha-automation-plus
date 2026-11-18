@@ -25,8 +25,8 @@ import { BLOCK_REGISTRY_HA_VERSION, BLOCK_TYPES, WEEKDAY_ORDER, WEEKDAY_LABELS, 
 // affiché dans le badge du header ; DEBUG_BUILD_DATE n'est plus dans le
 // header (retiré sur demande) et sera affiché dans le futur bloc « À propos »
 // de la page Réglages (pas encore codée).
-const DEBUG_VERSION = "0.8.0-beta.8";
-const DEBUG_BUILD_DATE = "2026-09-17";
+const DEBUG_VERSION = "0.8.0-beta.9";
+const DEBUG_BUILD_DATE = "2026-11-18";
 
 const REPO_URL = "https://github.com/la12lab/ha-automation-plus";
 const ISSUES_URL = `${REPO_URL}/issues`;
@@ -427,6 +427,18 @@ class AutomationPlusPanel extends HTMLElement {
     // _editionMutateList. Limite de profondeur : EDITION_HISTORY_LIMIT.
     this._editionHistory = { past: [], future: [] };
     this._editionHistoryMuted = false;
+    // Enregistrement de la vue Liste (issue #104) : popup de confirmation
+    // ouverte et envoi en cours. _editionSaving bloque tout (double clic,
+    // mutation, Undo/Redo) pendant le POST.
+    this._editionSaveConfirmOpen = false;
+    this._editionSaving = false;
+    // Garde de sortie (issue #114) : popup « Quitter sans enregistrer ? » et
+    // action de navigation en attente (exécutée seulement si confirmée).
+    this._editionLeaveConfirmOpen = false;
+    this._editionPendingLeave = null;
+    // Brouillon restauré depuis localStorage (issue #108), affiché dans le
+    // bandeau tant que les modifications ne sont ni enregistrées ni annulées.
+    this._editionDraftRestored = false;
     // Sidebar "Aller à" de la vue Code (issue #112, ajustement post-review) :
     // sélection PERSISTANTE (retour utilisateur explicite — pas un état
     // transitoire) — reclique sur le même bouton pour désélectionner, un
@@ -456,6 +468,23 @@ class AutomationPlusPanel extends HTMLElement {
   // bouton Annuler et (indirectement) Enregistrer en vue Liste.
   get _editionDirty() {
     return this._editionCategoryChanged("trigger") || this._editionCategoryChanged("condition") || this._editionCategoryChanged("action");
+  }
+
+  // Motif pour lequel Enregistrer est indisponible, ou null s'il est actif
+  // (issue #104). Sert à la fois à l'état du bouton, à son infobulle et aux
+  // gardes de _openEditionSaveConfirm()/_saveEditionConfig().
+  get _editionSaveBlockedReason() {
+    if (this._editionSubView !== "liste") return "Pas encore disponible";
+    if (this._storageMode === "folder") return "Indisponible en mode dossier dédié";
+    if (!this._editionYaml?.config) return "Automatisation non chargée";
+    if (!this._editionAutomation?.id) return "Automatisation sans identifiant : enregistrement impossible";
+    if (this._editionSaving) return "Enregistrement en cours…";
+    if (!this._editionDirty) return "Aucune modification à enregistrer";
+    return null;
+  }
+
+  get _editionCanSave() {
+    return this._editionSaveBlockedReason === null;
   }
 
   // Compare le CONTENU de la liste courante d'une catégorie à celui
@@ -1249,6 +1278,45 @@ class AutomationPlusPanel extends HTMLElement {
     `;
   }
 
+  // Popup de confirmation d'enregistrement de la vue Liste (issue #104),
+  // calquée sur la popup de suppression (même structure .popup-*). Résume
+  // les catégories modifiées via _editionCategoryChanged(). Boutons figés
+  // (--ap-btn-bg / --ap-accent-blue, voir DESIGN-COLORS.md).
+  _renderEditionSaveConfirmPopup() {
+    const automation = this._editionAutomation;
+    if (!automation) return "";
+    const saving = this._editionSaving;
+    const labels = { trigger: "Déclencheurs", condition: "Conditions", action: "Actions" };
+    const changed = Object.keys(labels).filter((category) => this._editionCategoryChanged(category));
+    const summary = changed.length
+      ? `<p class="popup-text-secondary">Modifié : ${changed.map((category) => labels[category]).join(", ")}.</p>`
+      : "";
+    return `
+      <div class="popup-overlay" data-popup="edition-save">
+        <div class="popup-card popup-delete">
+          <div class="popup-header">
+            <div class="popup-header-title">
+              ${this._icon(ICON_CHECK, 16)}
+              <span>Enregistrer les modifications ?</span>
+            </div>
+            <button class="popup-close" data-action="cancel-edition-save" title="Fermer" ${saving ? "disabled" : ""}>${this._icon(ICON_X, 14)}</button>
+          </div>
+          <div class="popup-body">
+            <p>Les modifications de « ${escapeHtml(automation.name || "")} » seront écrites dans automations.yaml.</p>
+            ${summary}
+            <p class="popup-text-secondary">Home Assistant valide la configuration puis recharge l'automatisation. Une configuration invalide sera refusée : vos modifications restent alors en cours ici.</p>
+          </div>
+          <div class="popup-footer">
+            <button class="popup-btn popup-btn-secondary" data-action="cancel-edition-save" ${saving ? "disabled" : ""}>Annuler</button>
+            <button class="popup-btn popup-btn-primary" data-action="confirm-edition-save" ${saving ? "disabled" : ""}>
+              ${this._icon(ICON_CHECK, 14)}<span>${saving ? "Enregistrement…" : "Enregistrer"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   // Popup "Détail" (menu Options, design pen `i3oGr`) — édite les
   // métadonnées registre HA d'une automatisation (nom, icône, pièce,
   // catégorie, étiquettes) + son activation. Pièce et Catégorie en
@@ -1402,6 +1470,10 @@ class AutomationPlusPanel extends HTMLElement {
     this._editionOriginalConfig = null;
     this._editionBlockOriginMap = { trigger: [], condition: [], action: [] };
     this._editionHistory = { past: [], future: [] };
+    this._editionSaveConfirmOpen = false;
+    this._editionLeaveConfirmOpen = false;
+    this._editionPendingLeave = null;
+    this._editionDraftRestored = false;
     this._editionBlockMenuOpenFor = null;
     this._editionPaletteQuery = "";
     this._editionPaletteActiveCategory = "trigger";
@@ -1455,12 +1527,8 @@ class AutomationPlusPanel extends HTMLElement {
       // ensuite) + correspondance identité index→index par catégorie, pour
       // dériver "modifié" par comparaison de contenu plutôt qu'un drapeau
       // manuel (voir _editionCategoryChanged()/_editionIsBlockModified()).
-      this._editionOriginalConfig = JSON.parse(JSON.stringify(config));
-      this._editionBlockOriginMap = {};
-      for (const category of Object.keys(EDITION_LIST_KEYS)) {
-        const [singular, plural] = EDITION_LIST_KEYS[category];
-        this._editionBlockOriginMap[category] = pickList(config, singular, plural).map((_, i) => i);
-      }
+      this._editionResetOrigin(config);
+      this._editionRestoreDraft(config);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("AutomationPlus: échec du chargement du YAML de l'automatisation", err);
@@ -1537,6 +1605,9 @@ class AutomationPlusPanel extends HTMLElement {
   _editionMutateList(category, mutator) {
     const state = this._editionYaml;
     if (!state || !state.config) return;
+    // Aucune mutation pendant l'enregistrement ni popup de confirmation
+    // ouverte (issue #104) : ce qui est confirmé est ce qui est envoyé.
+    if (this._editionSaving || this._editionSaveConfirmOpen) return;
     const [singular, plural] = EDITION_LIST_KEYS[category];
     const beforeList = pickList(state.config, singular, plural);
     const list = JSON.parse(JSON.stringify(beforeList));
@@ -1556,6 +1627,10 @@ class AutomationPlusPanel extends HTMLElement {
     delete config[singular];
     state.config = config;
     state.lines = this._stringifyYaml(config);
+    // Une nouvelle modification : le bandeau « Brouillon restauré » n'a plus
+    // lieu d'être (état courant ≠ brouillon restauré tel quel).
+    this._editionDraftRestored = false;
+    this._editionPersistDraft();
   }
 
   // Snapshot complet de l'état annulable de la vue Liste (issue #90, lot 1) :
@@ -1592,10 +1667,13 @@ class AutomationPlusPanel extends HTMLElement {
     // Un menu kebab resté ouvert sur un index qui vient de changer de sens
     // serait un piège (issue #105) — toujours refermé après restauration.
     this._editionBlockMenuOpenFor = null;
+    // Le brouillon local (#108) suit aussi Undo/Redo : revenir à l'état
+    // d'origine le supprime (getter _editionDirty dérivé du contenu).
+    this._editionPersistDraft();
   }
 
   _editionUndo() {
-    if (!this._editionHistory.past.length) return;
+    if (!this._editionHistory.past.length || this._editionSaving || this._editionSaveConfirmOpen) return;
     this._editionHistoryMuted = true;
     try {
       const current = this._editionSnapshot();
@@ -1609,7 +1687,7 @@ class AutomationPlusPanel extends HTMLElement {
   }
 
   _editionRedo() {
-    if (!this._editionHistory.future.length) return;
+    if (!this._editionHistory.future.length || this._editionSaving || this._editionSaveConfirmOpen) return;
     this._editionHistoryMuted = true;
     try {
       const current = this._editionSnapshot();
@@ -1805,6 +1883,195 @@ class AutomationPlusPanel extends HTMLElement {
       .join("");
   }
 
+  // Photo de la config comme "état d'origine" + correspondance identité
+  // index→index par catégorie (issue #104 : factorisé, appelé au chargement
+  // et après un enregistrement réussi). Clonage profond : la photo n'est
+  // jamais mutée ensuite.
+  _editionResetOrigin(config) {
+    this._editionOriginalConfig = JSON.parse(JSON.stringify(config));
+    this._editionBlockOriginMap = {};
+    for (const category of Object.keys(EDITION_LIST_KEYS)) {
+      const [singular, plural] = EDITION_LIST_KEYS[category];
+      this._editionBlockOriginMap[category] = pickList(config, singular, plural).map((_, i) => i);
+    }
+  }
+
+  // Brouillon local de la vue Liste (issue #108) : les modifications non
+  // enregistrées survivent à un rechargement de la page (localStorage,
+  // une entrée par automatisation). Le brouillon embarque la config
+  // d'origine : il n'est restauré que si HA n'a pas changé depuis (sinon
+  // il serait périmé et écraserait une version plus récente).
+  _editionDraftKey(id) {
+    return `automation_plus.edition_draft.${id}`;
+  }
+
+  _editionPersistDraft() {
+    const id = this._editionAutomation?.id;
+    const config = this._editionYaml?.config;
+    if (!id || !config) return;
+    try {
+      if (this._editionDirty) {
+        localStorage.setItem(
+          this._editionDraftKey(id),
+          JSON.stringify({
+            savedAt: Date.now(),
+            original: this._editionOriginalConfig,
+            config,
+            originMap: this._editionBlockOriginMap,
+          })
+        );
+      } else {
+        localStorage.removeItem(this._editionDraftKey(id));
+      }
+    } catch (err) {
+      // localStorage indisponible/plein : le brouillon est un confort, pas
+      // une fonction critique — on ignore.
+    }
+  }
+
+  _editionClearDraft() {
+    const id = this._editionAutomation?.id;
+    this._editionDraftRestored = false;
+    if (!id) return;
+    try {
+      localStorage.removeItem(this._editionDraftKey(id));
+    } catch (err) {
+      // voir _editionPersistDraft()
+    }
+  }
+
+  // Appelée après le chargement de la config depuis HA (_loadEditionYaml).
+  _editionRestoreDraft(serverConfig) {
+    const id = this._editionAutomation?.id;
+    if (!id) return;
+    try {
+      const raw = localStorage.getItem(this._editionDraftKey(id));
+      if (!raw) return;
+      const draft = JSON.parse(raw);
+      if (!draft?.config || JSON.stringify(draft.original) !== JSON.stringify(serverConfig)) {
+        // Brouillon périmé (l'automatisation a changé côté HA) : abandonné.
+        localStorage.removeItem(this._editionDraftKey(id));
+        return;
+      }
+      this._editionYaml = { ...this._editionYaml, config: draft.config, lines: this._stringifyYaml(draft.config) };
+      this._editionBlockOriginMap = draft.originMap || this._editionBlockOriginMap;
+      this._editionDraftRestored = this._editionDirty;
+      if (!this._editionDraftRestored) localStorage.removeItem(this._editionDraftKey(id));
+    } catch (err) {
+      // Brouillon illisible : ignoré.
+    }
+  }
+
+  // Garde de sortie (issue #114) : toute navigation qui quitte la page
+  // Édition (Retour, Réglages) passe par ici. Avec des modifications non
+  // enregistrées en vue Liste, ouvre « Quitter sans enregistrer ? » et
+  // diffère la navigation ; sinon l'exécute tout de suite. Quitter confirmé
+  // = abandon explicite, donc le brouillon local (#108) est supprimé (un
+  // rechargement de page, lui, le conserve).
+  _editionRequestLeave(action) {
+    if (this._editionDirty && !this._editionSaving) {
+      this._editionPendingLeave = action;
+      this._editionLeaveConfirmOpen = true;
+      this._editionBlockMenuOpenFor = null;
+      this._render();
+      return;
+    }
+    action();
+  }
+
+  _closeEditionLeaveConfirm() {
+    this._editionLeaveConfirmOpen = false;
+    this._editionPendingLeave = null;
+    this._render();
+  }
+
+  _confirmEditionLeave() {
+    const action = this._editionPendingLeave;
+    this._editionLeaveConfirmOpen = false;
+    this._editionPendingLeave = null;
+    this._editionClearDraft();
+    if (action) action();
+  }
+
+  // Popup « Quitter sans enregistrer ? » (issue #114), même structure que
+  // la popup de suppression (action destructive : bouton rouge figé).
+  _renderEditionLeaveConfirmPopup() {
+    const automation = this._editionAutomation;
+    return `
+      <div class="popup-overlay" data-popup="edition-leave">
+        <div class="popup-card popup-delete">
+          <div class="popup-header">
+            <div class="popup-header-title danger">
+              ${this._icon(ICON_ALERT_TRIANGLE, 16)}
+              <span>Quitter sans enregistrer ?</span>
+            </div>
+            <button class="popup-close" data-action="cancel-edition-leave" title="Fermer">${this._icon(ICON_X, 14)}</button>
+          </div>
+          <div class="popup-body">
+            <p>Les modifications de « ${escapeHtml(automation?.name || "")} » n'ont pas été enregistrées.</p>
+            <p class="popup-text-secondary">Si vous quittez maintenant, elles seront perdues.</p>
+          </div>
+          <div class="popup-footer">
+            <button class="popup-btn popup-btn-secondary" data-action="cancel-edition-leave">Rester</button>
+            <button class="popup-btn popup-btn-danger" data-action="confirm-edition-leave">Quitter sans enregistrer</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Popup de confirmation d'enregistrement (issue #104) : refusée si
+  // Enregistrer est indisponible (garde unique : _editionSaveBlockedReason).
+  _openEditionSaveConfirm() {
+    if (!this._editionCanSave) return;
+    this._editionBlockMenuOpenFor = null;
+    this._editionSaveConfirmOpen = true;
+    this._render();
+  }
+
+  _closeEditionSaveConfirm() {
+    if (this._editionSaving) return;
+    this._editionSaveConfirmOpen = false;
+    this._render();
+  }
+
+  // Écriture réelle (issue #104) : POST config/automation/config/<id> avec
+  // la config courante (HA valide le schéma, écrit le bloc dans
+  // automations.yaml et recharge l'automatisation de lui-même, comme pour
+  // la suppression, cf. #74). Indépendante de la sous-vue pour que le mode
+  // Code (#89) la réutilise. Succès : resynchronisation LOCALE (HA ne
+  // renvoie que {"result":"ok"}) — nouvelle origine, historique Undo/Redo
+  // vidé (un ancien état n'aurait plus d'origine cohérente), sélection
+  // conservée (les index ne bougent pas), pas de toast de succès (le
+  // bandeau qui disparaît et le bouton qui se grise suffisent). Échec :
+  // toast, popup laissée ouverte pour réessayer, RIEN d'autre ne change.
+  async _saveEditionConfig() {
+    if (!this._editionCanSave) return;
+    const automation = this._editionAutomation;
+    const id = automation.id;
+    // Clone profond : ce qui est envoyé ne peut plus être muté entre-temps.
+    const payload = JSON.parse(JSON.stringify(this._editionYaml.config));
+    this._editionSaving = true;
+    this._render();
+    try {
+      await this._hass.callApi("POST", `config/automation/config/${id}`, payload);
+      const config = this._editionYaml.config;
+      this._editionResetOrigin(config);
+      this._editionHistory = { past: [], future: [] };
+      this._editionYaml = { ...this._editionYaml, lines: this._stringifyYaml(config) };
+      this._editionSaveConfirmOpen = false;
+      this._editionClearDraft();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("AutomationPlus: échec de l'enregistrement de l'automatisation", err);
+      const detail = err?.body?.message || err?.message || err?.error || "erreur inconnue";
+      this._showErrorToast(`Impossible d'enregistrer « ${automation.name || id} » : ${detail}`);
+    } finally {
+      this._editionSaving = false;
+      this._render();
+    }
+  }
+
   // Bouton "Annuler" du header, vue Liste (issue #101, suite à retour
   // utilisateur) : abandonne TOUTES les modifications en mémoire d'un coup
   // en rechargeant l'automatisation depuis HA — aucune écriture réseau,
@@ -1813,7 +2080,10 @@ class AutomationPlusPanel extends HTMLElement {
   // aussi la pile undo/redo, un ancien état intermédiaire abandonné ne doit
   // pas redevenir accessible après un "Annuler".
   _editionDiscardChanges() {
-    if (!this._editionDirty) return;
+    if (!this._editionDirty || this._editionSaving || this._editionSaveConfirmOpen) return;
+    // Le brouillon local (#108) doit disparaître AVANT le rechargement, sinon
+    // _loadEditionYaml() le restaurerait aussitôt.
+    this._editionClearDraft();
     this._selectedBlock = null;
     this._editionBlockMenuOpenFor = null;
     this._loadEditionYaml();
@@ -2523,7 +2793,8 @@ class AutomationPlusPanel extends HTMLElement {
     // l'instant — Code reste intégralement lecture seule (#87) et Graphe
     // n'existe pas encore (#86), aucune des deux n'alimente donc la pile.
     const showLock = this._editionSubView === "code";
-    const cancelEnabled = this._editionSubView === "liste" && this._editionDirty;
+    const cancelEnabled = this._editionSubView === "liste" && this._editionDirty && !this._editionSaving;
+    const saveBlockedReason = this._editionSaveBlockedReason;
     const undoEnabled = this._editionSubView === "liste" && this._editionHistory.past.length > 0;
     const redoEnabled = this._editionSubView === "liste" && this._editionHistory.future.length > 0;
     return `
@@ -2578,10 +2849,15 @@ class AutomationPlusPanel extends HTMLElement {
           <button
             class="popup-btn popup-btn-secondary"
             data-action="discard-edition-changes"
-            title="${cancelEnabled ? "Annuler les modifications non enregistrées" : "Pas encore disponible"}"
+            title="${cancelEnabled ? "Annuler les modifications non enregistrées" : this._editionSubView === "liste" ? "Aucune modification à annuler" : "Pas encore disponible"}"
             ${cancelEnabled ? "" : "disabled"}
           >Annuler</button>
-          <button class="popup-btn popup-btn-primary" title="Pas encore disponible" disabled>
+          <button
+            class="popup-btn popup-btn-primary"
+            data-action="save-edition-changes"
+            title="${saveBlockedReason ?? "Enregistrer les modifications"}"
+            ${saveBlockedReason ? "disabled" : ""}
+          >
             ${this._icon(ICON_CHECK, 14)}<span>Enregistrer</span>
           </button>
           <span class="edition-actions-separator"></span>
@@ -2597,17 +2873,17 @@ class AutomationPlusPanel extends HTMLElement {
   }
 
   // Bandeau commun aux deux onglets d'Édition (Liste/Code). L'onglet Code
-  // reste intégralement lecture seule (#87) ; l'onglet Liste permet
-  // maintenant des modifications en mémoire (#101) — le bandeau reflète
-  // alors l'état "non enregistré" plutôt que "lecture seule", tant qu'aucune
-  // édition n'existe le message générique reste affiché. Écriture réelle
-  // toujours hors périmètre (#88/#89/#92).
+  // reste intégralement lecture seule (#87, enregistrement : #89). L'onglet
+  // Liste est éditable et enregistrable (#101/#104) : le bandeau n'apparaît
+  // que lorsqu'il y a des modifications non enregistrées, sans modification
+  // le bouton Enregistrer grisé suffit (plus de message "lecture seule").
   _renderEditionReadonlyBanner() {
-    if (this._editionSubView === "liste" && this._editionDirty) {
+    if (this._editionSubView === "liste" && !this._editionDirty) return "";
+    if (this._editionSubView === "liste") {
       return `
         <div class="edition-readonly-banner edition-readonly-banner-dirty">
           ${this._icon(ICON_ALERT_TRIANGLE, 14)}
-          <span>Modifications non enregistrées — l'enregistrement sera bientôt disponible.</span>
+          <span>${this._editionDraftRestored ? "Brouillon restauré — modifications non enregistrées." : "Modifications non enregistrées."}</span>
         </div>
       `;
     }
@@ -5176,6 +5452,8 @@ class AutomationPlusPanel extends HTMLElement {
       <div class="toast-container">${this._renderToast()}</div>
       ${this._editionHelpOpen ? this._renderEditionHelpPopup() : ""}
       ${this._deleteConfirmFor ? this._renderDeleteConfirmPopup() : ""}
+      ${this._editionSaveConfirmOpen ? this._renderEditionSaveConfirmPopup() : ""}
+      ${this._editionLeaveConfirmOpen ? this._renderEditionLeaveConfirmPopup() : ""}
       ${this._detailPopupFor ? this._renderAutomationDetailPopup() : ""}
     `;
     this._attachListeners();
@@ -5381,6 +5659,47 @@ class AutomationPlusPanel extends HTMLElement {
       });
     }
 
+    const saveEditionBtn = root.querySelector('[data-action="save-edition-changes"]');
+    if (saveEditionBtn) {
+      saveEditionBtn.addEventListener("click", () => {
+        this._openEditionSaveConfirm();
+      });
+    }
+
+    const editionLeavePopup = root.querySelector('.popup-overlay[data-popup="edition-leave"]');
+    if (editionLeavePopup) {
+      editionLeavePopup.addEventListener("click", (event) => {
+        if (event.target === editionLeavePopup) {
+          this._closeEditionLeaveConfirm();
+          return;
+        }
+        const actionEl = event.target.closest("[data-action]");
+        if (!actionEl) return;
+        if (actionEl.dataset.action === "cancel-edition-leave") {
+          this._closeEditionLeaveConfirm();
+        } else if (actionEl.dataset.action === "confirm-edition-leave") {
+          this._confirmEditionLeave();
+        }
+      });
+    }
+
+    const editionSavePopup = root.querySelector('.popup-overlay[data-popup="edition-save"]');
+    if (editionSavePopup) {
+      editionSavePopup.addEventListener("click", (event) => {
+        if (event.target === editionSavePopup) {
+          this._closeEditionSaveConfirm();
+          return;
+        }
+        const actionEl = event.target.closest("[data-action]");
+        if (!actionEl) return;
+        if (actionEl.dataset.action === "cancel-edition-save") {
+          this._closeEditionSaveConfirm();
+        } else if (actionEl.dataset.action === "confirm-edition-save") {
+          this._saveEditionConfig();
+        }
+      });
+    }
+
     const detailPopup = root.querySelector('.popup-overlay[data-popup="detail"]');
     if (detailPopup) {
       detailPopup.addEventListener("click", (event) => {
@@ -5445,7 +5764,12 @@ class AutomationPlusPanel extends HTMLElement {
     const backBtn = root.querySelector(".back-btn");
     if (backBtn) {
       backBtn.addEventListener("click", () => {
-        if (this._view === "settings" || this._view === "edition") {
+        if (this._view === "edition") {
+          this._editionRequestLeave(() => {
+            this._view = "dashboard";
+            this._render();
+          });
+        } else if (this._view === "settings") {
           this._view = "dashboard";
           this._render();
         } else {
@@ -5522,8 +5846,12 @@ class AutomationPlusPanel extends HTMLElement {
     const settingsBtnHeader = root.querySelector(".settings-btn-header");
     if (settingsBtnHeader) {
       settingsBtnHeader.addEventListener("click", () => {
-        this._view = "settings";
-        this._render();
+        const goToSettings = () => {
+          this._view = "settings";
+          this._render();
+        };
+        if (this._view === "edition") this._editionRequestLeave(goToSettings);
+        else goToSettings();
       });
     }
 
